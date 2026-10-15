@@ -1,0 +1,27 @@
+# ============================================================
+# 汽车知识库 RAG 系统 —— 依赖清单
+# 技术栈：LlamaIndex（检索）+ LangChain（编排）+ FastAPI（接口）
+# ============================================================
+
+# ---------- 阶段 1：LlamaIndex 检索核心 ----------
+llama-index-core==0.14.24
+llama-index-embeddings-huggingface==0.8.0   # bge-m3 向量化
+llama-index-llms-deepseek==0.4.1            # DeepSeek 生成
+llama-index-readers-file==0.7.0             # PDF 读取
+llama-index-retrievers-bm25==0.8.0          # BM25 关键词检索
+llama-index-postprocessor-sbert-rerank==0.6.0  # cross-encoder 重排
+llama-index-vector-stores-chroma            # ChromaDB 向量库持久化
+
+# ---------- 阶段 2：FastAPI 接口层 ----------
+fastapi
+uvicorn[standard]
+
+# ---------- 阶段 3：LangChain 编排层 ----------
+langchain
+langchain-deepseek
+langchain-community
+
+# ---------- 通用工具 ----------
+python-dotenv
+pypdf
+rich

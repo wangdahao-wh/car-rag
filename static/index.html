@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BMW 车主手册助手</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8;
+    color: #1a1a1a;
+    line-height: 1.7;
+    padding: 24px 16px;
+  }
+
+  .container { max-width: 760px; margin: 0 auto; }
+
+  header { text-align: center; margin-bottom: 28px; }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: 0.5px; }
+  .subtitle { color: #8a8f98; font-size: 13px; margin-top: 6px; }
+
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    margin-bottom: 16px;
+  }
+
+  /* 输入区 */
+  .input-row { display: flex; gap: 10px; }
+  input[type="text"] {
+    flex: 1;
+    padding: 12px 14px;
+    border: 1px solid #dfe1e5;
+    border-radius: 8px;
+    font-size: 15px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color .15s;
+  }
+  input[type="text"]:focus { border-color: #2b6cb0; }
+
+  button {
+    padding: 12px 24px;
+    background: #2b6cb0;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  button:hover:not(:disabled) { background: #245a94; }
+  button:disabled { background: #b8c4d0; cursor: not-allowed; }
+
+  /* 示例问题 */
+  .examples { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .example {
+    font-size: 13px;
+    color: #2b6cb0;
+    background: #eef4fa;
+    padding: 5px 11px;
+    border-radius: 14px;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .example:hover { background: #ddeaf7; }
+
+  /* 答案区 */
+  #answer { white-space: pre-wrap; word-break: break-word; min-height: 20px; }
+  #answer:empty::before { content: "答案会显示在这里…"; color: #b8bfc7; }
+
+  .cursor {
+    display: inline-block;
+    width: 2px; height: 1em;
+    background: #2b6cb0;
+    vertical-align: text-bottom;
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* 来源区 */
+  #sources { margin-top: 18px; padding-top: 16px; border-top: 1px solid #eef0f3; }
+  #sources:empty { display: none; }
+  .sources-title { font-size: 13px; color: #8a8f98; margin-bottom: 8px; }
+  .source {
+    display: flex;
+    gap: 8px;
+    font-size: 13px;
+    padding: 6px 0;
+    color: #4a5568;
+  }
+  .source .page {
+    flex-shrink: 0;
+    background: #eef4fa;
+    color: #2b6cb0;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .error { color: #c53030; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>BMW 车主手册助手</h1>
+    <div class="subtitle">基于 356 页车主手册的 RAG 问答 · 答案附页码出处</div>
+  </header>
+
+  <div class="card">
+    <div class="input-row">
+      <input type="text" id="question" placeholder="问点什么，比如：胎压数据在哪看？"
+             autocomplete="off" autofocus>
+      <button id="askBtn">提问</button>
+    </div>
+    <div class="examples">
+      <span class="example">胎压数据在哪看？</span>
+      <span class="example">雾天自动大灯能识别吗？</span>
+      <span class="example">座椅位置能记忆吗？</span>
+      <span class="example">这辆车在火星上能开吗？</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="answer"></div>
+    <div id="sources"></div>
+  </div>
+
+</div>
+
+<script>
+const inputEl  = document.getElementById('question');
+const btnEl    = document.getElementById('askBtn');
+const answerEl = document.getElementById('answer');
+const sourcesEl = document.getElementById('sources');
+
+// 点示例问题直接填入
+document.querySelectorAll('.example').forEach(el => {
+  el.addEventListener('click', () => {
+    inputEl.value = el.textContent;
+    ask();
+  });
+});
+
+btnEl.addEventListener('click', ask);
+inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+
+
+async function ask() {
+  const question = inputEl.value.trim();
+  if (!question) return;
+
+  // 重置界面
+  answerEl.textContent = '';
+  sourcesEl.innerHTML = '';
+  btnEl.disabled = true;
+
+  // 打字光标
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  answerEl.appendChild(cursor);
+
+  try {
+    const resp = await fetch('/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail?.[0]?.msg || `HTTP ${resp.status}`);
+    }
+
+    // ★ 逐块读取流式响应
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // ★ 关键：stream:true 让多字节中文（如"雾"）不会被拆坏
+      buffer += decoder.decode(value, { stream: true });
+
+      // ★ SSE 事件以 \n\n 分隔；最后一段可能不完整，留在 buffer 里
+      const events = buffer.split('\n\n');
+      buffer = events.pop();
+
+      for (const evt of events) {
+        if (!evt.startsWith('data: ')) continue;
+
+        let data;
+        try { data = JSON.parse(evt.slice(6)); }
+        catch { continue; }        // 忽略解析失败的块
+
+        if (data.type === 'sources') {
+          renderSources(data.sources);
+        } else if (data.type === 'token') {
+          cursor.insertAdjacentText('beforebegin', data.text);
+        } else if (data.type === 'done') {
+          cursor.remove();
+        }
+      }
+    }
+  } catch (e) {
+    cursor.remove();
+    answerEl.innerHTML = `<span class="error">出错了：${e.message}</span>`;
+  } finally {
+    btnEl.disabled = false;
+    inputEl.focus();
+  }
+}
+
+
+function renderSources(sources) {
+  if (!sources || !sources.length) return;
+
+  // 同一页可能被多个 chunk 命中，按页码去重
+  const seen = new Set();
+  const items = [];
+  for (const s of sources) {
+    if (seen.has(s.page)) continue;
+    seen.add(s.page);
+    items.push(s);
+  }
+
+  sourcesEl.innerHTML = '<div class="sources-title">来源</div>' +
+    items.map(s => {
+      const path = [s.chapter, s.section].filter(Boolean).join(' > ');
+      return `<div class="source">
+                <span class="page">第 ${s.page} 页</span>
+                <span>${path || '（无标题）'}</span>
+              </div>`;
+    }).join('');
+}
+</script>
+</body>
+</html>
