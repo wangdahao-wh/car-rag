@@ -140,7 +140,7 @@ data/index/
 
 ## 评估结果
 
-**评估集**：27 道车主真实问题（19 基础检索 + 6 理解推理 + 跨章节 + 3 拒答测试），**gold 页码已逐题核对**。
+**评估集**：30 道题 = 26 道基础检索 + 1 道跨章节多跳 + 3 道拒答测试；其中 27 道有 gold 页码、参与召回评估，**gold 页码已逐题核对**。
 
 ### 检索层
 
@@ -242,7 +242,7 @@ car-rag/
 │       ├── main.py               FastAPI 应用
 │       └── rag_service.py        RAG 服务（模型单例）
 ├── eval/
-│   ├── qa_set.jsonl          评估集（机器可读）
+│   ├── qa_set.json           评估集（机器可读）
 │   ├── evaluate.py           检索评估
 │   └── test_refuse.py        拒答测试
 ├── scripts/

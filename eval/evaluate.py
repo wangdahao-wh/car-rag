@@ -16,10 +16,11 @@ COLLECTION = "bmw_x3_manual"
 
 RETRIEVE_N = 20
 TOP_K = 5
+DEBUG_ID = None        # 设为题目 id（如 25）可打印该题的检索诊断
 
 def main():
     qa = [json.loads(l) for l in open(QA_PATH, encoding="utf-8") if l.strip()]
-    qa_eval = [x for x in qa if x["groud_truth"] is not None]
+    qa_eval = [x for x in qa if x["ground_truth"] is not None]
     print(f"评估集 ： {len(qa_eval)} 题（另有 {len(qa) - len(qa_eval)} 题拒答测试）\n")
 
     Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-m3")
@@ -48,17 +49,19 @@ def main():
         results.append((item["type"],best))
         details.append((item["id"], item["question"], best))
 
-        if item["id"] == 25:
+        if item["id"] == DEBUG_ID:
             print(f"\n[诊断] 题{item['id']}: {item['question']}")
             print(f"  检索返回的页: {pages}")
             print(f"  gold 页: {item['source_pages']}")
 
     n = len(qa_eval)
-    # for k in (1,3,5):
-    #     hits = sum(1 for r in ranks if 0 < r <= k)
-    #     print(f"Recall@{k} = {hits/n:.2f}. ({hits}/ {n})")
-    # mmr = sum(1/ r if r else 0 for r in ranks) / n
-    # print(f"MMR.    = {mmr:.2f}")
+    ranks = [r for _, r in results]
+    print("\n --- 整体指标 ---")
+    for k in (1, 3, 5):
+        hits = sum(1 for r in ranks if 0 < r <= k)
+        print(f" Recall@{k} = {hits/n:.2f}  ({hits}/{n})")
+    mrr = sum(1 / r if r else 0 for r in ranks) / n
+    print(f" MRR     = {mrr:.2f}")
 
     print(f"\n --- 逐题明细 ---")
     for qid, q, r in details:

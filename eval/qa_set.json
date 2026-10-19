@@ -1,30 +1,30 @@
-{"id": 1, "question": "胎压数据在哪看？", "groud_truth": "驾驶员侧车门的门柱上", "source_pages": [284], "type": "basic"}
-{"id": 2, "question": "多久检查一次轮胎压力？", "groud_truth": "每月两次，或长途行车前", "source_pages": [284], "type": "basic"}
-{"id": 3, "question": "检查胎压有什么前提条件？", "groud_truth": "轮胎需冷却：行驶不超过 2 km，或车辆静止至少 2 小时", "source_pages": [285], "type": "basic"}
-{"id": 4, "question": "胎压过低有什么危险？", "groud_truth": "轮胎发烫并损坏，影响转向和制动性能，有事故危险", "source_pages": [284], "type": "basic"}
-{"id": 5, "question": "怎么知道油箱加满了？", "groud_truth": "加油枪首次自动关闭时，燃油箱已满", "source_pages": [282], "type": "basic"}
-{"id": 6, "question": "油表见底了还能开多远？", "groud_truth": "可达里程低于 50 公里时可能无法供应足够燃油，应及时加油", "source_pages": [149, 282], "type": "basic"}
-{"id": 7, "question": "油箱盖怎么关才对？", "groud_truth": "顺时针旋转直到听见清晰的咔止声，再按紧盖板到卡入", "source_pages": [283], "type": "basic"}
-{"id": 8, "question": "油箱盖打不开怎么办？", "groud_truth": "需由授权售后服务经销商手动解锁", "source_pages": [283], "type": "basic"}
-{"id": 9, "question": "车灯开关在哪？", "groud_truth": "方向盘附近", "source_pages": [155], "type": "basic"}
-{"id": 10, "question": "自动车灯控制怎么工作？", "groud_truth": "近光灯根据周边环境亮度自动开启或关闭", "source_pages": [155], "type": "basic"}
-{"id": 11, "question": "雾天自动大灯能识别吗？", "groud_truth": "不能，传感器无法识别雾天和潮湿天气，需手动开启车灯", "source_pages": [155], "type": "basic"}
-{"id": 12, "question": "车内空气是怎么净化的？", "groud_truth": "通过车厢内排放监测器、车内过滤器、空调系统、驻车通风、电离技术、香氛等", "source_pages": [241], "type": "basic"}
-{"id": 13, "question": "空调滤芯什么时候换？", "groud_truth": "车辆制造商建议在车辆保养时更换车内过滤器", "source_pages": [241], "type": "basic"}
-{"id": 14, "question": "警告三角标志放哪？", "groud_truth": "行李箱左侧储物格中", "source_pages": [318], "type": "basic"}
-{"id": 15, "question": "反光安全背心放在哪？", "groud_truth": "驾驶侧或前乘客侧车门的储物格，或手套箱内", "source_pages": [318], "type": "basic"}
-{"id": 16, "question": "警示闪光灯按钮在哪？", "groud_truth": "中央控制台内", "source_pages": [318], "type": "basic"}
-{"id": 17, "question": "座椅位置能记忆吗？", "groud_truth": "可以电动调整的座椅支持用记忆功能存储当前座椅位置", "source_pages": [102], "type": "basic"}
-{"id": 18, "question": "调整座椅后要注意什么？", "groud_truth": "调整后稍微前后移动座椅，确认已正确嵌入锁定", "source_pages": [102], "type": "basic"}
-{"id": 19, "question": "冬天该换什么轮胎？怎么识别？", "groud_truth": "建议冬季使用冬季用轮胎；可通过雪花山峰图标及轮胎侧壁的 M+S 标记识别", "source_pages": [288], "type": "basic"}
-{"id": 20, "question": "带 M+S 标记的四季轮胎能代替冬季轮胎吗？", "groud_truth": "冬季特性优于夏季轮胎，但通常达不到冬季轮胎的性能", "source_pages": [288], "type": "basic"}
-{"id": 21, "question": "前后轮胎可以对调吗？", "groud_truth": "仅当前后轴轮胎尺寸和轮辋尺寸相同时才可对调", "source_pages": [288], "type": "basic"}
-{"id": 22, "question": "行驶中提示轮胎损坏该怎么办？", "groud_truth": "立刻减速并停车，检查车轮和轮胎，小心驾驶到售后服务经销商；不要修理，应更换", "source_pages": [286], "type": "basic"}
-{"id": 23, "question": "什么情况会损坏轮胎？", "groud_truth": "驶过路缘、道路损坏、轮胎压力过低、车辆超载、不正确的轮胎储存", "source_pages": [286], "type": "basic"}
-{"id": 24, "question": "限速信息是怎么采集的？", "groud_truth": "车内后视镜区域的摄像头采集道路边缘的道路标志", "source_pages": [197], "type": "basic"}
-{"id": 25, "question": "长途出行前应该做哪些检查？", "groud_truth": "检查轮胎压力、检查轮胎状况、确认燃油充足", "source_pages": [32, 284, 286, 282], "type": "multi_hop"}
-{"id": 26, "question": "车辆保养相关的事有哪些？", "groud_truth": "保养系统提示保养措施、空调滤芯在保养时更换、车况保养", "source_pages": [312, 241], "type": "basic"}
-{"id": 27, "question": "车内有哪些应急装备？分别放在哪？", "groud_truth": "反光安全背心、警告三角标志、警示闪光灯、包扎绷带", "source_pages": [318], "type": "basic"}
-{"id": 28, "question": "这辆车在火星上能开吗？", "groud_truth": null, "source_pages": [], "type": "refuse"}
-{"id": 29, "question": "换个轮胎要多少钱？", "groud_truth": null, "source_pages": [], "type": "refuse"}
-{"id": 30, "question": "这车和奔驰 GLC 哪个好？", "groud_truth": null, "source_pages": [], "type": "refuse"}
+{"id": 1, "question": "胎压数据在哪看？", "ground_truth": "驾驶员侧车门的门柱上", "source_pages": [284], "type": "basic"}
+{"id": 2, "question": "多久检查一次轮胎压力？", "ground_truth": "每月两次，或长途行车前", "source_pages": [284], "type": "basic"}
+{"id": 3, "question": "检查胎压有什么前提条件？", "ground_truth": "轮胎需冷却：行驶不超过 2 km，或车辆静止至少 2 小时", "source_pages": [285], "type": "basic"}
+{"id": 4, "question": "胎压过低有什么危险？", "ground_truth": "轮胎发烫并损坏，影响转向和制动性能，有事故危险", "source_pages": [284], "type": "basic"}
+{"id": 5, "question": "怎么知道油箱加满了？", "ground_truth": "加油枪首次自动关闭时，燃油箱已满", "source_pages": [282], "type": "basic"}
+{"id": 6, "question": "油表见底了还能开多远？", "ground_truth": "可达里程低于 50 公里时可能无法供应足够燃油，应及时加油", "source_pages": [149, 282], "type": "basic"}
+{"id": 7, "question": "油箱盖怎么关才对？", "ground_truth": "顺时针旋转直到听见清晰的咔止声，再按紧盖板到卡入", "source_pages": [283], "type": "basic"}
+{"id": 8, "question": "油箱盖打不开怎么办？", "ground_truth": "需由授权售后服务经销商手动解锁", "source_pages": [283], "type": "basic"}
+{"id": 9, "question": "车灯开关在哪？", "ground_truth": "方向盘附近", "source_pages": [155], "type": "basic"}
+{"id": 10, "question": "自动车灯控制怎么工作？", "ground_truth": "近光灯根据周边环境亮度自动开启或关闭", "source_pages": [155], "type": "basic"}
+{"id": 11, "question": "雾天自动大灯能识别吗？", "ground_truth": "不能，传感器无法识别雾天和潮湿天气，需手动开启车灯", "source_pages": [155], "type": "basic"}
+{"id": 12, "question": "车内空气是怎么净化的？", "ground_truth": "通过车厢内排放监测器、车内过滤器、空调系统、驻车通风、电离技术、香氛等", "source_pages": [241], "type": "basic"}
+{"id": 13, "question": "空调滤芯什么时候换？", "ground_truth": "车辆制造商建议在车辆保养时更换车内过滤器", "source_pages": [241], "type": "basic"}
+{"id": 14, "question": "警告三角标志放哪？", "ground_truth": "行李箱左侧储物格中", "source_pages": [318], "type": "basic"}
+{"id": 15, "question": "反光安全背心放在哪？", "ground_truth": "驾驶侧或前乘客侧车门的储物格，或手套箱内", "source_pages": [318], "type": "basic"}
+{"id": 16, "question": "警示闪光灯按钮在哪？", "ground_truth": "中央控制台内", "source_pages": [318], "type": "basic"}
+{"id": 17, "question": "座椅位置能记忆吗？", "ground_truth": "可以电动调整的座椅支持用记忆功能存储当前座椅位置", "source_pages": [102], "type": "basic"}
+{"id": 18, "question": "调整座椅后要注意什么？", "ground_truth": "调整后稍微前后移动座椅，确认已正确嵌入锁定", "source_pages": [102], "type": "basic"}
+{"id": 19, "question": "冬天该换什么轮胎？怎么识别？", "ground_truth": "建议冬季使用冬季用轮胎；可通过雪花山峰图标及轮胎侧壁的 M+S 标记识别", "source_pages": [288], "type": "basic"}
+{"id": 20, "question": "带 M+S 标记的四季轮胎能代替冬季轮胎吗？", "ground_truth": "冬季特性优于夏季轮胎，但通常达不到冬季轮胎的性能", "source_pages": [288], "type": "basic"}
+{"id": 21, "question": "前后轮胎可以对调吗？", "ground_truth": "仅当前后轴轮胎尺寸和轮辋尺寸相同时才可对调", "source_pages": [288], "type": "basic"}
+{"id": 22, "question": "行驶中提示轮胎损坏该怎么办？", "ground_truth": "立刻减速并停车，检查车轮和轮胎，小心驾驶到售后服务经销商；不要修理，应更换", "source_pages": [286], "type": "basic"}
+{"id": 23, "question": "什么情况会损坏轮胎？", "ground_truth": "驶过路缘、道路损坏、轮胎压力过低、车辆超载、不正确的轮胎储存", "source_pages": [286], "type": "basic"}
+{"id": 24, "question": "限速信息是怎么采集的？", "ground_truth": "车内后视镜区域的摄像头采集道路边缘的道路标志", "source_pages": [197], "type": "basic"}
+{"id": 25, "question": "长途出行前应该做哪些检查？", "ground_truth": "检查轮胎压力、检查轮胎状况、确认燃油充足", "source_pages": [32, 284, 286, 282], "type": "multi_hop"}
+{"id": 26, "question": "车辆保养相关的事有哪些？", "ground_truth": "保养系统提示保养措施、空调滤芯在保养时更换、车况保养", "source_pages": [312, 241], "type": "basic"}
+{"id": 27, "question": "车内有哪些应急装备？分别放在哪？", "ground_truth": "反光安全背心、警告三角标志、警示闪光灯、包扎绷带", "source_pages": [318], "type": "basic"}
+{"id": 28, "question": "这辆车在火星上能开吗？", "ground_truth": null, "source_pages": [], "type": "refuse"}
+{"id": 29, "question": "换个轮胎要多少钱？", "ground_truth": null, "source_pages": [], "type": "refuse"}
+{"id": 30, "question": "这车和奔驰 GLC 哪个好？", "ground_truth": null, "source_pages": [], "type": "refuse"}

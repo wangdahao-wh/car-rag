@@ -11,8 +11,10 @@ docs/*.pdf
 # ============================================================
 # 构建产物（可重新生成）
 # ============================================================
-data/index/                    # ChromaDB 向量库（约 10MB，可用 build_index.py 重建）
-data/*-chunks.json             # 切分结果（可用 build_chunks_new.py 重建）
+# ChromaDB 向量库（可用 build_index.py 重建）
+data/index/
+# 切分结果（可用 build_chunks_new.py 重建）
+data/*-chunks.json
 
 # ============================================================
 # Python

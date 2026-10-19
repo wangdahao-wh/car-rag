@@ -81,7 +81,7 @@ for item in QA:
     out.append({
         "id": item["id"],
         "question": item["question"],
-        "groud_truth": item["gt"],
+        "ground_truth": item["gt"],
         "source_pages": item["pages"],
         "type": "refuse" if item["gt"] is None else "basic",
     })

@@ -28,7 +28,7 @@ REFUSE_QUESTIONS = [
 
 def main():
     qa = [json.loads(l) for l in open(QA_PATH, encoding="utf-8") if l.strip()]
-    qa_eval = [x for x in qa if x["groud_truth"] is not None]
+    qa_eval = [x for x in qa if x["ground_truth"] is not None]
     print(f"评估集 ： {len(qa_eval)} 题（另有 {len(qa) - len(qa_eval)} 题拒答测试）\n")
 
     # ① 全局配置：指定用哪个 embedding 模型
