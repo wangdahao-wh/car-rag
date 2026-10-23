@@ -8,7 +8,7 @@ def generate(question, contexts):
     关键：prompt里强制约束「只依据资料 + 没有就说无法确定」"""
 
     ctx = "\n\n".join(
-        f"[{i}](第{n.node.metadata["page"]}页) {n.node.text}" for i, n in enumerate(contexts, 1)
+        f"[{i}](第{n.node.metadata['page']}页) {n.node.text}" for i, n in enumerate(contexts, 1)
     )
 
     prompt = f"""你是严谨的 BMW 车主手册助手。请严格遵守：

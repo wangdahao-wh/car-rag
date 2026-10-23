@@ -15,9 +15,9 @@ for c in chunks:
         i = c['text'].find(KEY)
         print(f"===第{c['page']}页===")
         if c['page'] == 330 :
-            print(f"{c["text"].replace(chr(10), "")}")
+            print(f"{c['text'].replace(chr(10), '')}")
         else:
-            print(f"{c["text"][i:i+150].replace(chr(10), "")}")
+            print(f"{c['text'][i:i+150].replace(chr(10), '')}")
         print()
         text = c["text"].replace(chr(10), "").replace(KEY_REPLACE, "")
         print(f"替换后\n{text}")

@@ -65,9 +65,9 @@ class RAGService:
             for n in nodes
         ]
         # ② 先把【引用来源】发出去（用户在等答案时就能看到出处）
-        yield f"data: {json.dumps({"type":"sources", 'sources':sources}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'sources', 'sources': sources}, ensure_ascii=False)}\n\n"
 
         for token in generate_stream(question, nodes):
             yield f"data: {json.dumps({'type':'token', 'text': token}, ensure_ascii=False)}\n\n"
 
-        yield f"data: {json.dumps({"type":"done"})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
