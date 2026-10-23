@@ -4,7 +4,6 @@
 import json
 import sys
 from pathlib import Path
-import shutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -55,16 +54,12 @@ def to_node(chunks):
 def build_index(nodes):
     """向量化 + 存入 ChromaDB"""
     Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-m3")
-    if INDEX_DIR.exists():
-        shutil.rmtree(INDEX_DIR)
-        print(f"已清空旧的索引目录")
     client = chromadb.PersistentClient(path=str(INDEX_DIR))
-    # try:
-    #     client.delete_collection(COLLECTION)
-    #     print(f"已删除旧的 collection: {COLLECTION}")
-    # except Exception as e:
-    #     print(f"删除旧的 collection 失败: {e}")
-    #     pass
+    try:
+        client.delete_collection(COLLECTION)
+        print(f"已删除旧的 collection: {COLLECTION}")
+    except Exception:
+        pass
 
     collection = client.create_collection(COLLECTION)
     vector_store = ChromaVectorStore(chroma_collection=collection)

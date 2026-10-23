@@ -7,7 +7,6 @@ services:
   car-rag:
     build: .
     image: car-rag:latest
-    container_name: car-rag
     ports:
       - "8000:8000"
     # 从 .env 读取 DEEPSEEK_API_KEY（.env 不提交到 git）
@@ -20,8 +19,9 @@ services:
     volumes:
       # 持久化 bge-m3 / bge-reranker 模型权重，避免每次重启重新下载（约 3GB）
       - hf_models:/models
-      # 持久化 ChromaDB 向量库；首次启动若为空，entrypoint 会自动从 chunks.json 构建
-      - rag_index:/app/data/index
+      # 宿主机上的 ChromaDB 索引目录；由 deploy/rebuild_index.sh 离线构建后挂载
+      # 注意：Chroma 需要写权限，不能加 :ro
+      - ./data/index:/app/data/index
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -33,4 +33,3 @@ services:
 
 volumes:
   hf_models:
-  rag_index:

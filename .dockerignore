@@ -12,8 +12,8 @@ __pycache__
 .env
 .env.*
 
-# 向量库索引（容器内通过 volume 挂载，构建时不需要）
-data/index/
+# 数据工件（chunks / 向量库索引）运行时挂载，不进镜像
+data/
 
 # PDF 源文件（体积大，且可能涉及版权）
 docs/*.pdf
