@@ -8,8 +8,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装系统依赖：build-essential 用于编译部分 Python 包；curl 用于健康检查
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 使用国内镜像，避免 deb.debian.org / PyPI 在国内超时或 EOF
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     libgomp1 \
@@ -17,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 先安装依赖，利用 Docker 层缓存（requirements.txt 不变时不重复安装）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
 # 复制应用代码（.dockerignore 会排除 .venv / .env / data / *.pdf 等）
 COPY . .
@@ -30,6 +31,7 @@ RUN sed -i 's/\r$//' deploy/entrypoint.sh && chmod +x deploy/entrypoint.sh
 
 # HuggingFace 模型缓存目录（由 docker-compose 挂载到 volume）
 ENV HF_HOME=/models \
+    HF_ENDPOINT=https://hf-mirror.com \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8000
