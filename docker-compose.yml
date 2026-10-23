@@ -1,0 +1,36 @@
+# ============================================================
+# BMW X3 车主手册 RAG —— Docker Compose 编排
+# 用法：docker compose up -d
+# ============================================================
+
+services:
+  car-rag:
+    build: .
+    image: car-rag:latest
+    container_name: car-rag
+    ports:
+      - "8000:8000"
+    # 从 .env 读取 DEEPSEEK_API_KEY（.env 不提交到 git）
+    env_file:
+      - .env
+    environment:
+      # HuggingFace 模型缓存挂载点（对应下面的 hf_models volume）
+      - HF_HOME=/models
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # 持久化 bge-m3 / bge-reranker 模型权重，避免每次重启重新下载（约 3GB）
+      - hf_models:/models
+      # 持久化 ChromaDB 向量库；首次启动若为空，entrypoint 会自动从 chunks.json 构建
+      - rag_index:/app/data/index
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      # 首次启动需要下载模型 + 加载 embedding/reranker，给足启动缓冲
+      start_period: 180s
+
+volumes:
+  hf_models:
+  rag_index:

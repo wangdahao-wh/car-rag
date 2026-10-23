@@ -1,0 +1,37 @@
+# Python 虚拟环境
+.venv
+venv
+
+# 字节码缓存
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+
+# 敏感信息
+.env
+.env.*
+
+# 向量库索引（容器内通过 volume 挂载，构建时不需要）
+data/index/
+
+# PDF 源文件（体积大，且可能涉及版权）
+docs/*.pdf
+
+# 日志
+logs/
+*.log
+
+# Git
+.git
+.gitignore
+
+# 编辑器 / 系统
+.vscode
+.idea
+.DS_Store
+
+# Docker 自身文件（避免重复打入）
+Dockerfile
+docker-compose.yml
+.dockerignore
