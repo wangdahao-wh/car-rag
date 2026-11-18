@@ -25,3 +25,4 @@ langchain-community
 python-dotenv
 pypdf
 rich
+requests    # MinerU 加载器调用在线 API

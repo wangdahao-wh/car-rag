@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from src.api.rag_service import RAGService
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-INDEX_DIR = ROOT / "data" / "index"
 
 # 全局服务实例 启动时初始化，请求时复用
 service : RAGService | None = None
@@ -22,15 +21,15 @@ service : RAGService | None = None
 async def lifespan(app:FastAPI):
     """启动时加载模型， 关闭时清理"""
     global service
-    print("⏳ 正在加载模型（bge-m3 + reranker），首次启动需要几十秒...")
-    service = RAGService(INDEX_DIR)
+    print("⏳ 正在加载模型（embedder + reranker），首次启动需要几十秒...")
+    service = RAGService()
     print("✅ 服务就绪")
     yield
     print("👋 服务关闭")
 
 app = FastAPI(
     title="BMW 车主手册问答",
-    description="基于 LlamaIndex + bge-m3 + ChromaDB 的 RAG 问答系统",
+    description="基于 LlamaIndex 的 RAG 问答系统（模型/向量库可配置）",
     version="1.0",
     lifespan=lifespan,
 )
