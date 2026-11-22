@@ -11,6 +11,7 @@ llama-index-readers-file==0.7.0             # PDF 读取
 llama-index-retrievers-bm25==0.8.0          # BM25 关键词检索
 llama-index-postprocessor-sbert-rerank==0.6.0  # cross-encoder 重排
 llama-index-vector-stores-chroma            # ChromaDB 向量库持久化
+llama-index-vector-stores-elasticsearch==0.7.0  # Elasticsearch 向量库
 
 # ---------- 阶段 2：FastAPI 接口层 ----------
 fastapi

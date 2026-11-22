@@ -1,8 +1,9 @@
 """向量库工厂：按环境变量 VECTOR_STORE 选择实现。
 
 配置（.env）：
-    VECTOR_STORE=chroma    # 默认，自带持久化
-    VECTOR_STORE=faiss     # 预留工程位，未实现
+    VECTOR_STORE=chroma           # 默认，自带持久化
+    VECTOR_STORE=elasticsearch    # 外部 ES 服务
+    VECTOR_STORE=faiss            # 预留工程位，未实现
 
 与 loaders/ 的 get_loader() 同构：读 .env → 返回统一接口的实现实例。
 
@@ -30,17 +31,23 @@ def vector_store_name() -> str:
 
 
 def get_vector_store(persist_dir: Path) -> VectorStoreBase:
-    """按 VECTOR_STORE 取向量库实例；persist_dir 为该组合的索引持久化目录。"""
+    """按 VECTOR_STORE 取向量库实例。
+
+    本地向量库把 persist_dir 作为持久化目录；ES 用它生成远端索引名。
+    """
     name = vector_store_name()
 
     if name == "chroma":
         from .chroma_store import ChromaStore
         return ChromaStore(persist_dir)
+    elif name == "elasticsearch":
+        from .elasticsearch_store import ElasticsearchVectorStore
+        return ElasticsearchVectorStore(persist_dir)
     elif name == "faiss":
         from .faiss_store import FaissStore
         return FaissStore(persist_dir)
     else:
-        raise ValueError(f"未知的 VECTOR_STORE: {name}（可选：chroma / faiss）")
+        raise ValueError(f"未知的 VECTOR_STORE: {name}（可选：chroma / elasticsearch / faiss）")
 
 
 __all__ = ["VectorStoreBase", "vector_store_name", "get_vector_store"]

@@ -1,6 +1,6 @@
 """向量库抽象基类：定义建库/检索的统一协议。
 
-所有向量库（chroma / faiss 预留）都实现 build / load，
+所有向量库（chroma / elasticsearch / faiss 预留）都实现 build / load，
 上游（build_index 入库 pipeline）和检索侧（test_retrieval / rag_service）共用同一接口。
 
 设计约定：

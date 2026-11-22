@@ -17,44 +17,12 @@ from statistics import median
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.core.loaders import get_loader
+from src.core.utils import setup_logging
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 DOCS_DIR = ROOT / "docs"
-LOGS_DIR = ROOT / "logs"
 
-
-def setup_logging(loader_name: str) -> Path:
-    """配置日志（实时写入，异常时不丢失）。
-    
-    Returns:
-        日志文件路径
-    """
-    LOGS_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = LOGS_DIR / f"build_chunks_{loader_name.lower()}_{timestamp}.log"
-    
-    # 自定义 FileHandler：每次写入立即刷新
-    class ImmediateFileHandler(logging.FileHandler):
-        def emit(self, record):
-            super().emit(record)
-            self.flush()  # 每条日志立即刷新
-    
-    # 清除旧的 handler（避免重复）
-    logging.root.handlers.clear()
-    
-    # 配置 root logger
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[
-            ImmediateFileHandler(log_file, encoding="utf-8"),  # 文件（立即刷新）
-            logging.StreamHandler(sys.stdout),                  # 控制台
-        ],
-        force=True,  # 强制重新配置
-    )
-    
-    return log_file
+logger = logging.getLogger(__name__)
 
 
 def print_stats(chunks, logger=None):
@@ -97,20 +65,35 @@ def save_chunks(chunks, path, logger=None):
     log(f"\n已保存 {len(chunks)} 个 chunk 到 {path}")
 
 
-def get_output_path(pdf_path: Path, loader_name: str) -> Path:
-    """根据加载器类型和 PDF 文件名生成输出路径。
+def get_output_path(pdf_path: Path, chunks: list[dict]) -> Path:
+    """根据 PDF 文件名和实际解析加载器生成输出路径。
+
+    输出目录按 chunk 里的 loader 字段决定（pypdf / mineru），
+    AutoLoader 路由后各文件落到各自目录，不会统一落 mineru/。
 
     开启 TABLE_ROW_SERIALIZATION（.env）时输出到 chunks_rowwise/，
     与默认的 chunks/ 并存，便于两套方案做检索效果对比。
 
+    文件名带构建时间戳（如 领克_2027_03_配置表_20261120_1806.json），
+    用于区分新旧产物；同时清理同 stem 的旧版本（无时间戳老文件 +
+    历史时间戳版本），避免下游 build_index 重复加载。
+
     :param pdf_path: PDF 文件路径
-    :param loader_name: 加载器名称（PyPDFLoader / MinerULoader）
+    :param chunks: 该 PDF 解析出的 chunk 列表（取 loader 字段）
     :return: chunks JSON 输出路径
     """
     pdf_stem = pdf_path.stem  # 文件名（不含 .pdf）
-    loader_type = "pypdf" if "PyPDF" in loader_name else "mineru"
+    loader_type = chunks[0]["loader"] if chunks else "mineru"
     chunks_dir = "chunks_rowwise" if os.environ.get("TABLE_ROW_SERIALIZATION", "0") == "1" else "chunks"
-    return ROOT / "processed_docs" / loader_type / chunks_dir / f"{pdf_stem}.json"
+    out_dir = ROOT / "processed_docs" / loader_type / chunks_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 清理旧版本：未加时间戳的老文件 + 带时间戳的历史版本
+    for old in list(out_dir.glob(f"{pdf_stem}.json")) + list(out_dir.glob(f"{pdf_stem}_2*.json")):
+        old.unlink()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return out_dir / f"{pdf_stem}_{timestamp}.json"
 
 
 if __name__ == "__main__":
@@ -120,13 +103,11 @@ if __name__ == "__main__":
     loader_name = type(loader).__name__
     
     # 配置日志
-    log_file = setup_logging(loader_name)
-    logger = logging.getLogger(__name__)
+    log_file = setup_logging("build_chunks", loader_name.lower())
     
     logger.info("=" * 60)
     logger.info(f"加载器: {loader_name}")
     logger.info(f"扫描目录: {DOCS_DIR}")
-    logger.info(f"日志文件: {log_file}")
     logger.info("=" * 60)
     logger.info("")
     
@@ -158,8 +139,8 @@ if __name__ == "__main__":
             # 统计
             print_stats(chunks, logger)
             
-            # 保存
-            output_path = get_output_path(pdf_path, loader_name)
+            # 保存（输出目录按 chunk 实际的 loader 字段决定）
+            output_path = get_output_path(pdf_path, chunks)
             save_chunks(chunks, output_path, logger)
             
             # 抽样展示

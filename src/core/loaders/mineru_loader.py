@@ -38,9 +38,20 @@ VL_MODEL = "qwen3-vl-plus"  # 空表体二次提取用的视觉模型（qwen-vl-
 # 用于和默认的原始 HTML 方案做检索效果对比
 TABLE_ROW_SERIALIZATION = os.environ.get("TABLE_ROW_SERIALIZATION", "0") == "1"
 
-TABLE_HEADER_ROWS = 2  # 配置表通常两级表头：第一行车型名 + 第二行动力总成
+# 伪标题黑名单：MinerU 会把页脚水印和手册警示标签误判为标题（text_level）。
+# 两条判定规则（都不能误杀"低压蓄电池处理的安全警告"这类真标题）：
+#   - 含 "carob"：水印 www.carobook.com 及其 OCR 截断/正文粘连变体，整条丢弃
+#   - 纯警示标签（警告/注意/说明/危险，可带叹号或英文对照）：降级为正文行
+FAKE_TITLE_TAG_PATTERN = re.compile(r"^(警告|注意|说明|危险)！?(WARNING|CAUTION|NOTE|DANGER)?$")
+
+# 目录页条目特征：正文行里出现 >= 3 处「条目名. . .页码」导航模式即判定为目录，整条丢弃
+# （目录条目对检索无价值，还会抢占 top-k 名额）
+TOC_LINE_PATTERN = re.compile(r"\S+\s*\.\s*\.\s*\.\s*\d+")
+TOC_MIN_LINES = 3
 
 # 配置表符号 → 语义文字（单元格内容精确匹配整个符号才替换）
+# 领克用 ●/○/-，BMW 用 ■/□（■=标配、□=选装，图例见配置表末页）；
+# "一" 是 BMW 配置表里 "-"（不含）的 OCR 变体
 _TABLE_SYMBOL_MAP = {
     "●": "标配",
     "○": "选装",
@@ -48,7 +59,13 @@ _TABLE_SYMBOL_MAP = {
     "o": "选装",
     "-": "不含",
     "—": "不含",
+    "一": "不含",
+    "■": "标配",
+    "□": "选装",
 }
+
+# 复合值前缀符号替换：□¥1,500 → 选装 ¥1,500（选装价格）
+_VALUE_PREFIX_MAP = {"□": "选装 ", "■": "标配 "}
 
 # 空表体转录提示词：图片型/符号型配置表转 HTML
 TABLE_TRANSCRIBE_PROMPT = (
@@ -188,6 +205,9 @@ class _TableRowsParser(HTMLParser):
         elif tag in ("td", "th") and self._row is not None:
             self._cell = []
             self._colspan = int(dict(attrs).get("colspan") or 1)
+        elif tag == "br" and self._cell is not None:
+            # <br> 换行转为空格，避免相邻文本粘连（如 xDrive 25i<br>M运动套装）
+            self._cell.append(" ")
 
     def handle_endtag(self, tag):
         if tag == "tr" and self._row is not None:
@@ -203,75 +223,133 @@ class _TableRowsParser(HTMLParser):
             self._cell.append(data)
 
 
-def serialize_table_rowwise(html: str, header_rows: int = TABLE_HEADER_ROWS) -> str:
-    """表格行级序列化：每行展开为「配置项 | 列名: 值」的自解释文本。
+def doc_display_name(pdf_path: Path) -> str:
+    """从 PDF 文件名生成文档显示名（行级 chunk 面包屑用）。
+
+    文件名格式 {品牌}_{年份}_{车型}_{文档类型}：
+        领克_2027_03_配置表   → 领克03 配置表
+        BMW_2024_X3_配置表    → BMW X3 配置表
+    """
+    parts = pdf_path.stem.split("_")
+    if len(parts) >= 4:
+        company, model, doc_type = parts[0], parts[2], parts[3]
+        # ASCII 品牌（BMW）和车型之间加空格，中文品牌（领克）直接拼接
+        sep = " " if company.isascii() else ""
+        return f"{company}{sep}{model} {doc_type}"
+    return pdf_path.stem
+
+
+def _pad_row(row: list[str], col_count: int) -> list[str]:
+    """行内单元格不足列数时补空。"""
+    return [row[i] if i < len(row) else "" for i in range(col_count)]
+
+
+def _is_group_row(cells: list[str]) -> bool:
+    """分组行判定。
+
+    两种形态：
+        1. colspan 跨全列的分组标题：展开后整行同值（安全性 安全性 安全性 安全性）
+        2. 独立分组行：首列有值、其余全空
+    首列为空的行不算分组（避免把首列丢失的数据行误判成分组）。
+    """
+    non_empty = [c for c in cells if c]
+    if not non_empty:
+        return False
+    if cells[0] and len(set(non_empty)) == 1:
+        return True
+    return bool(cells[0]) and not any(cells[1:])
+
+
+def _map_value(cell: str) -> str:
+    """单元格值 → 语义文字：整格符号替换 + 前缀符号替换（□¥1,500 → 选装 ¥1,500）。"""
+    val = _TABLE_SYMBOL_MAP.get(cell, cell)
+    if val and val[0] in _VALUE_PREFIX_MAP:
+        val = _VALUE_PREFIX_MAP[val[0]] + val[1:].lstrip()
+    return val
+
+
+def serialize_table_rows(html: str) -> list[dict]:
+    """表格行级序列化：每行解析为结构化条目。
 
     纯本地解析（html.parser 标准库），不调用任何模型，零 token 消耗。
     规则：
-        1. 前 header_rows 行作为表头，逐列拼成完整列名（两级表头如 纯Lite(1.5TD-6MT)）
-        2. 符号单元格替换为语义文字（●→标配、○/O→选装、-→不含）
-        3. colspan 展开后，连续同值列合并显示（列A/列B: 值）
-        4. 分组行（首列有值、其余全空）输出为 [分组名]
-        5. 每行独立成行且自带列名，后续按行切分 chunk 不会丢失列语义
+        1. 表头区：从顶部扫描，遇到分组行、或第 2 行起首列有值的行即停
+           （覆盖单级/两级表头、无表头续表；跨页续表会把分组标签和列名
+           合并在首行，首列的标签转为初始 category）
+        2. 分组行（整行同值 / 首列有值其余空）更新当前 category，不生成条目
+        3. 符号单元格替换为语义文字（●/■→标配、○/□→选装、-→不含；
+           前缀符号如 □¥1,500 → 选装 ¥1,500）
+        4. colspan 展开后，连续同值列合并（列A/列B=值）
+
+    Returns:
+        [{"category": 分组名, "param": 配置项, "values": [(列名, 值), ...]}, ...]
+        空表体返回 []
     """
     parser = _TableRowsParser()
     parser.feed(html)
     # 丢弃整行为空的行
     rows = [r for r in parser.rows if any(r)]
     if not rows:
-        return ""
+        return []
 
     col_count = max(len(r) for r in rows)
-    header = rows[:header_rows]
+    padded = [_pad_row(r, col_count) for r in rows]
+
+    # 表头边界：遇分组行、或第 2 行起首列有值的行（数据行）即停。
+    # 首行允许首列有值——跨页续表的首行是「分组标签 + 列名」合并行
+    header_end = 0
+    for i, r in enumerate(padded):
+        if _is_group_row(r):
+            break
+        if i > 0 and r[0]:
+            break
+        header_end = i + 1
+    header = padded[:header_end]
+
+    # 跨页续表：表头首行首列是上页带入的分组标签（内装/BMW技术）
+    category = header[0][0] if header and header[0][0] else ""
 
     # 逐列拼接多级表头：某一级为空时只取非空的层级
     col_names = []
     for i in range(col_count):
-        parts = [h[i] for h in header if i < len(h) and h[i]]
+        parts = [h[i] for h in header if h[i]]
         if len(parts) > 1:
             col_names.append("(".join(parts) + ")")
         else:
             col_names.append(parts[0] if parts else "")
 
-    lines = []
-    for row in rows[header_rows:]:
-        # 行内单元格不足列数时补空
-        cells = [row[i] if i < len(row) else "" for i in range(col_count)]
-        # 分组行：首列有值、其余全空 → 小节标题
-        if cells[0] and not any(cells[1:]):
-            lines.append(f"[{cells[0]}]")
+    entries = []
+    for cells in padded[header_end:]:
+        if _is_group_row(cells):
+            category = cells[0]
             continue
         # 数据行：首列是配置项名，其余列合并连续同值
-        label = cells[0]
-        pairs = []
+        param = cells[0]
+        values = []
         i = 1
         while i < col_count:
-            val = _TABLE_SYMBOL_MAP.get(cells[i], cells[i])
+            val = _map_value(cells[i])
             j = i + 1
-            while j < col_count and _TABLE_SYMBOL_MAP.get(cells[j], cells[j]) == val:
+            while j < col_count and _map_value(cells[j]) == val:
                 j += 1
             cols = "/".join(n for n in col_names[i:j] if n)
             if val:
-                pairs.append(f"{cols}: {val}" if cols else val)
+                values.append((cols, val))
             i = j
-        if label or pairs:
-            lines.append(" | ".join([label] + pairs))
-    return "\n".join(lines)
+        if param and values:
+            entries.append({"category": category, "param": param, "values": values})
+    return entries
 
 
 def serialize_table(item: dict) -> str:
-    """序列化表格条目。
+    """序列化表格条目（整表模式：caption + 原始 HTML + footnote）。
 
     MinerU schema：table_caption / table_footnote 是字符串列表，table_body 是 HTML 字符串。
-    默认返回：caption + 原始 HTML 表体 + footnote。
-    开启 TABLE_ROW_SERIALIZATION（.env）后，表体改为行级序列化文本，
-    每个 chunk 自带列名和符号语义，便于 embedding 检索对比。
+    行级序列化（TABLE_ROW_SERIALIZATION）不经过这里，见 _table_row_chunks。
     """
     caption = "\n".join(item.get("table_caption") or [])
     body = item.get("table_body") or ""
     footnote = "\n".join(item.get("table_footnote") or [])
-    if TABLE_ROW_SERIALIZATION and body:
-        body = serialize_table_rowwise(body) or body
     return "\n".join(p for p in (caption, body, footnote) if p)
 
 
@@ -285,19 +363,36 @@ def serialize_image(item: dict) -> str:
     return "\n".join(item.get("img_caption") or [])
 
 
-def table_body_is_empty(body: str | None) -> bool:
-    """判断表格 HTML 是否为空表体（单元格全部无内容）。"""
+# 网格挤压特征：单元格文本内出现 >= 3 个连续空格分隔的多个非空片段。
+# 正常表格一列一个 td，单元格内容（中文/数字/单空格英文短语）不会有连续空格；
+# MinerU 结构识别失败时会把多个单元格的文字挤进同一个 td，
+# 列名之间保留 PDF 原始列间距的空格串，列网格整个丢失
+GRID_SQUASH_PATTERN = re.compile(r"\S\s{3,}\S")
+
+
+def table_body_is_usable(body: str | None) -> bool:
+    """判断表格 HTML 是否可用（结构完好，可供行级序列化）。
+
+    不可用的两种形态，统一路由到 qwen-vl 读图重转录：
+        1. 空表体：单元格全部无内容（MinerU 完全没读出，如符号矩阵）
+        2. 网格挤压：多个单元格的文字挤进同一个 td（连续空格分隔），
+           列网格丢失，行级序列化无法对齐列（图片型 PDF 常见）
+    """
     if not body:
-        return True
+        return False
     cells = re.findall(r"<td[^>]*>([^<]*)</td>", body)
-    return not any(c.strip() for c in cells)
+    if not any(c.strip() for c in cells):
+        return False  # 空表体
+    if any(GRID_SQUASH_PATTERN.search(c) for c in cells):
+        return False  # 网格挤压
+    return True
 
 
 def transcribe_table_image(image_path: Path, api_key: str, vl_url: str) -> str:
-    """调用 qwen-vl 把表格图片转录为 HTML 表格（空表体二次提取）。
+    """调用 qwen-vl 把表格图片转录为 HTML 表格（表体不可用二次提取）。
 
-    MinerU 对图片型/符号型表格（如配置表的实心/空心圆点矩阵）只输出空表体，
-    表格内容只在裁剪图片里，需要视觉模型转录。
+    MinerU 对图片型/符号型表格的两种失败形态（空表体/网格挤压），
+    表格内容只在裁剪图片里，需要视觉模型重新读图转录。
     """
     b64 = base64.b64encode(image_path.read_bytes()).decode()
     res = requests.post(
@@ -326,7 +421,7 @@ def transcribe_table_image(image_path: Path, api_key: str, vl_url: str) -> str:
     return html
 
 
-def recursive_split(text: str, max_tokens: int = 300, overlap: int = 50) -> list[str]:
+def recursive_split(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
     """递归切分长文本（简化版，按句子切分）。
     
     策略：按句号/问号/感叹号切句，累积到 max_tokens 后输出一个 chunk。
@@ -368,9 +463,10 @@ def recursive_split(text: str, max_tokens: int = 300, overlap: int = 50) -> list
 def chunks_from_content_list(
     content_list: list[dict],
     page_offset: int,
-    min_section_tokens: int = 50,
-    max_chunk_tokens: int = 300,
+    min_section_tokens: int = 80,
+    max_chunk_tokens: int = 500,
     overlap_tokens: int = 50,
+    doc_name: str = "",
 ) -> list[dict]:
     """把 MinerU 的 content_list.json 组装成统一 chunk（结构化切分 pipeline）。
 
@@ -382,35 +478,81 @@ def chunks_from_content_list(
         table_caption / table_body: 表格（序列化为文本）
         chart_caption: 图表标题
         img_caption: 图片标题
-    
+
     切分 Pipeline：
         1. parse_items       → 按标题分节 + 序列化内容类型
         2. merge_small       → 小节合并（< min_section_tokens）
         3. split_large       → 长文本细分（> max_chunk_tokens）
         4. format_chunks     → 组装最终 chunk 格式
-    
+
+    行级序列化（TABLE_ROW_SERIALIZATION=1）：
+        表格行不进上面的 pipeline，每行独立成 chunk（见 _table_row_chunks），
+        行文本自带 doc_name/category/param 面包屑，metadata 同步存这三个字段，
+        支持点查（向量命中）和枚举查询（category 过滤全量取回）。
+
     :param content_list: MinerU 解析的内容列表
     :param page_offset: 页码偏移（用于多分片 PDF）
-    :param min_section_tokens: 小节最小 token 数，默认 50
-    :param max_chunk_tokens: chunk 最大 token 数，默认 300
+    :param min_section_tokens: 小节最小 token 数，默认 80
+    :param max_chunk_tokens: chunk 最大 token 数，默认 500
     :param overlap_tokens: 细分时重叠 token 数，默认 50
+    :param doc_name: 文档显示名（行级 chunk 面包屑用，如 领克03 配置表）
     """
+    # 行级序列化：表格行独立成 chunk（点查友好）
+    row_chunks = _table_row_chunks(content_list, page_offset, doc_name) if TABLE_ROW_SERIALIZATION else []
+
     # Pipeline 阶段 1：解析条目 → 按标题分节
     sections = _parse_items_to_sections(content_list, page_offset)
     logger.debug("阶段 1 - 解析完成：%d 个小节", len(sections))
-    
+
     # Pipeline 阶段 2：合并过小的节
     sections = _merge_small_sections(sections, min_section_tokens)
     logger.debug("阶段 2 - 小节合并后：%d 个小节", len(sections))
-    
+
     # Pipeline 阶段 3：拆分超长的节
     sections = _split_large_sections(sections, max_chunk_tokens, overlap_tokens)
     logger.debug("阶段 3 - 长文本拆分后：%d 个 chunk", len(sections))
-    
+
     # Pipeline 阶段 4：组装最终格式
     chunks = _format_chunks(sections)
     logger.debug("阶段 4 - 格式化完成：%d 个 chunk", len(chunks))
-    
+
+    chunks.extend(row_chunks)
+    return chunks
+
+
+def _table_row_chunks(content_list: list[dict], page_offset: int, doc_name: str) -> list[dict]:
+    """行级序列化：表格每行生成一个独立 chunk。
+
+    行文本自带面包屑「doc_name > category > param」——metadata 不参与
+    向量相似度计算，品牌/车型/类别/配置项必须写进 text 才能被
+    embedding 命中（如查询「领克03 2.0T 有没有定速巡航」）。
+    metadata 保存 doc_name/category/param 供检索侧过滤
+    （如「领克03 有哪些智能驾驶功能」→ category=智能驾控 全量取回）。
+    """
+    chunks = []
+    for item in content_list:
+        if item.get("type") != "table":
+            continue
+        body = item.get("table_body") or ""
+        if not body:
+            continue
+        page = page_offset + item.get("page_idx", 0)
+
+        for row in serialize_table_rows(body):
+            # 面包屑只拼非空部分（手册表格可能没有分组行，category 为空）
+            crumbs = " > ".join(p for p in (doc_name, row["category"], row["param"]) if p)
+            values = "；".join(f"{cols}={val}" if cols else val for cols, val in row["values"])
+            chunks.append({
+                "text": f"{crumbs}：{values}",
+                "page": page,
+                "chapter": "",
+                "section": "",
+                "path": [],
+                "loader": "mineru",
+                "doc_name": doc_name,
+                "category": row["category"],
+                "param": row["param"],
+            })
     return chunks
 
 
@@ -448,9 +590,19 @@ def _parse_items_to_sections(content_list: list[dict], page_offset: int) -> list
         
         # 标题：先收上一节，再维护标题栈
         if item_type == "text" and item.get("text_level"):
+            # 剥离 MinerU 的上下标 HTML 标签，标题树保持干净
+            title_text = re.sub(r"</?(?:sub|sup)>", "", item["text"]).strip()
+            # 水印及粘连变体：整条丢弃（真标题不可能含 carob）
+            if "carob" in title_text.lower():
+                continue
+            # 纯警示标签：不开新节，降级为正文行留在当前节
+            if FAKE_TITLE_TAG_PATTERN.match(title_text):
+                if section_page is None:
+                    section_page = page_idx
+                lines.append(title_text)
+                continue
             flush_section()
             level = item["text_level"]
-            title_text = item["text"].strip()
             titles = [t for t in titles if t[0] < level] + [(level, title_text)]
             continue
         
@@ -458,7 +610,14 @@ def _parse_items_to_sections(content_list: list[dict], page_offset: int) -> list
         content = ""
         if item_type == "text":
             content = item.get("text", "").strip()
+            # 目录页判定：一条文本里大量「条目. . .页码」导航行 → 整条丢弃
+            if len(TOC_LINE_PATTERN.findall(content)) >= TOC_MIN_LINES:
+                continue
         elif item_type == "table":
+            # 行级模式：表格行已由 _table_row_chunks 独立处理，整表跳过；
+            # 行解析失败的表格（返回空）仍走整表序列化，避免内容丢失
+            if TABLE_ROW_SERIALIZATION and serialize_table_rows(item.get("table_body") or ""):
+                continue
             content = serialize_table(item)
         elif item_type == "chart":
             content = serialize_chart(item)
@@ -556,6 +715,7 @@ def _format_chunks(sections: list[dict]) -> list[dict]:
             "chapter": path[0] if len(path) > 0 else "",
             "section": path[1] if len(path) > 1 else "",
             "path": path,
+            "loader": "mineru",  # 切分来源标记（auto 模式下区分路由结果）
         })
     
     return chunks
@@ -606,10 +766,15 @@ class MinerULoader(PDFLoader):
         logger.info("=" * 60)
         logger.info("开始处理: %s", pdf_path.name)
         total_start = time.time()
-        
+        doc_name = doc_display_name(pdf_path)  # 行级 chunk 面包屑用（如 领克03 配置表）
+        # 配置表：图片型 PDF + 符号矩阵是 MinerU 已知弱区（空表体/网格挤压/
+        # 值列符号丢失三种失败形态同根因），全部表格统一走 qwen-vl 重转录
+        parts_name = pdf_path.stem.split("_")
+        is_config = len(parts_name) >= 4 and parts_name[3] == "配置表"
+
         # Pipeline 阶段 1：准备文件（分片，缓存和首次处理都需要页码区间）
         parts = self._prepare_files(pdf_path)
-        
+
         # 检查本地缓存：每个分片的解析结果都齐（目录存在且有 content_list）才算命中
         cache_dir = self.work_dir / pdf_path.stem
         extract_dirs = {}
@@ -618,24 +783,24 @@ class MinerULoader(PDFLoader):
             extract_dir = cache_dir / part_path.stem if len(parts) > 1 else cache_dir / pdf_path.stem
             if extract_dir.exists() and list(extract_dir.rglob("*_content_list.json")):
                 extract_dirs[part_path.name] = extract_dir
-        
+
         if len(extract_dirs) == len(parts):
             logger.info("检测到完整本地缓存（%d/%d 个分片），跳过上传/下载，直接切分",
                         len(extract_dirs), len(parts))
-            chunks = self._parse_and_chunk(parts, extract_dirs)
+            chunks = self._parse_and_chunk(parts, extract_dirs, doc_name, is_config)
         else:
             if extract_dirs:
                 logger.info("本地缓存不完整（%d/%d 个分片），重新走完整流程",
                             len(extract_dirs), len(parts))
-            
+
             # Pipeline 阶段 2：上传到 MinerU
             batch_id, part_paths = self._upload_to_mineru(parts)
-            
+
             # Pipeline 阶段 3：下载解析结果
             extract_dirs = self._download_results(batch_id, pdf_path.stem, part_paths)
-            
+
             # Pipeline 阶段 4：解析 + 切分 chunk
-            chunks = self._parse_and_chunk(parts, extract_dirs)
+            chunks = self._parse_and_chunk(parts, extract_dirs, doc_name, is_config)
         
         total_time = time.time() - total_start
         logger.info("完成处理: %s，生成 %d 个 chunk，总耗时 %.1f 秒", 
@@ -702,23 +867,39 @@ class MinerULoader(PDFLoader):
         logger.info("  耗时: %.1f 秒（包含 MinerU 在线解析 + 轮询 + 下载）", elapsed)
         return extract_dirs
     
-    def _repair_empty_tables(self, content_list: list[dict], content_list_path: Path) -> list[dict]:
-        """空表体二次提取：单元格全空的表格用 qwen-vl 读图转录，结果落盘缓存。
+    def _repair_broken_tables(
+        self,
+        content_list: list[dict],
+        content_list_path: Path,
+        transcribe_all: bool = False,
+    ) -> list[dict]:
+        """表体不可用二次提取：坏表格用 qwen-vl 读图转录，结果落盘缓存。
 
         修复结果写到 {content_list 文件名}_fixed.json，重跑直接读缓存，不重复调用。
+
+        Args:
+            transcribe_all: True 时不做坏表判定，全部表格重转录（配置表模式：
+                图片型 PDF + 符号矩阵是 MinerU 已知弱区，三种失败形态
+                ——空表体/网格挤压/值列符号丢失——同根因，统一走 VLM）
         """
-        to_repair = [
-            item for item in content_list
-            if item.get("type") == "table"
-            and table_body_is_empty(item.get("table_body"))
-            and item.get("img_path")  # 无裁剪图片的空表无法转录，保留 caption/footnote
-        ]
+        if transcribe_all:
+            to_repair = [
+                item for item in content_list
+                if item.get("type") == "table" and item.get("img_path")
+            ]
+        else:
+            to_repair = [
+                item for item in content_list
+                if item.get("type") == "table"
+                and not table_body_is_usable(item.get("table_body"))
+                and item.get("img_path")  # 无裁剪图片的坏表无法转录，保留 caption/footnote
+            ]
         if not to_repair:
             return content_list
 
         if not self.dashscope_api_key:
             raise RuntimeError(
-                f"检测到 {len(to_repair)} 个空表体表格，"
+                f"检测到 {len(to_repair)} 个表体不可用的表格（空表体/网格挤压），"
                 "需要 DASHSCOPE_API_KEY 调用 qwen-vl 二次提取（请在 .env 中填写）"
             )
         vl_url = os.environ.get("DASHSCOPE_VL_URL")
@@ -728,21 +909,26 @@ class MinerULoader(PDFLoader):
         base_dir = content_list_path.parent
         for item in to_repair:
             img_path = base_dir / item["img_path"]
-            logger.info("  空表体，qwen-vl 读图转录: %s", item["img_path"])
+            logger.info("  qwen-vl 读图转录: %s", item["img_path"])
             item["table_body"] = transcribe_table_image(img_path, self.dashscope_api_key, vl_url)
 
         fixed_path = content_list_path.with_name(f"{content_list_path.stem}_fixed.json")
         fixed_path.write_text(json.dumps(content_list, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("  已修复 %d 个空表体，缓存: %s", len(to_repair), fixed_path.name)
+        logger.info("  已修复 %d 个表体不可用表格，缓存: %s", len(to_repair), fixed_path.name)
         return content_list
 
     def _parse_and_chunk(
         self,
         parts: list[tuple[Path, int, int]],
-        extract_dirs: dict[str, Path]
+        extract_dirs: dict[str, Path],
+        doc_name: str = "",
+        is_config: bool = False,
     ) -> list[dict]:
         """Pipeline 阶段 4：解析 content_list + 切分 chunk。
-        
+
+        Args:
+            is_config: 是否配置表文档（True 时全部表格走 qwen-vl 重转录）
+
         Returns:
             chunk 列表
         """
@@ -772,7 +958,7 @@ class MinerULoader(PDFLoader):
                 logger.info("  使用修复缓存: %s", fixed_path.name)
             else:
                 content_list = json.loads(content_list_path.read_text(encoding="utf-8"))
-                content_list = self._repair_empty_tables(content_list, content_list_path)
+                content_list = self._repair_broken_tables(content_list, content_list_path, transcribe_all=is_config)
             logger.info("  处理分片: %s（第 %d 页起，%d 个条目）",
                        part_path.name, start, len(content_list))
             
@@ -783,6 +969,7 @@ class MinerULoader(PDFLoader):
                 min_section_tokens=self.min_section_tokens,
                 max_chunk_tokens=self.max_chunk_tokens,
                 overlap_tokens=self.overlap_tokens,
+                doc_name=doc_name,
             )
             chunks.extend(part_chunks)
             logger.info("  生成 %d 个 chunk", len(part_chunks))

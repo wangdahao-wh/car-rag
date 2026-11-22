@@ -8,12 +8,11 @@ RAG服务： 封装检索+重排+生成
 
 from pathlib import Path
 
-from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
-
 from src.core.build_index import get_index_dir
 from src.core.embedders import get_embedder
 from src.core.generate import generate, generate_stream
 from src.core.query_filter import build_query_filters
+from src.core.rerankers import get_reranker
 from src.core.vectorstores import get_vector_store, vector_store_name
 
 class RAGService:
@@ -25,7 +24,8 @@ class RAGService:
         store = get_vector_store(index_dir)
         self.index = store.load(embedder)
 
-        self.reranker = SentenceTransformerRerank(model="BAAI/bge-reranker-v2-m3", top_n=5)
+        # 重排器由 .env 的 RERANK_MODEL 决定（bge / dashscope / none 对照组）
+        self.reranker = get_reranker(top_n=5)
 
     def _retrieve(self, question: str):
         """检索 + 重排：问题带车型/品牌词时按 metadata 前置过滤。

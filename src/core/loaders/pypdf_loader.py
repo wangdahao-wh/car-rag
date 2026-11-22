@@ -1,239 +1,409 @@
-"""pypdf 加载器：基于字体层级的结构化切分（本项目原有方案，迁移自 build_chunks_new.py）。
+"""pypdf 加载器：优先使用 PDF 书签目录（outline）做结构化切分。
 
-原理：用 pypdf 的 visitor_text 回调拿到每段文字的字号，
-字号 >= 11.0 视为切分点（子标题），>= 10.0 视为标题（进路径），
-其余为正文。切分后每个 chunk 带完整标题路径。
+书签目录是出版社写入 PDF 元数据的权威标题树，包含标题文字和起始页码，
+比基于字号的启发式推断更准确（避免把页眉/书眉/提示语当成标题）。
 
-适用场景：手册类 PDF（字体层级规范、本地解析、无需联网）。
+路由判据（由 loaders/__init__.py 的 AutoLoader 调用 detect_outline 决定）：
+    有书签且层级数 >= 2  → load_from_outline（快速本地解析）
+    其他                 → MinerU（在线 OCR，如配置表、扁平书签手册、扫描件）
 
-降级模式：当 PDF 字体信息缺失（扫描件）时，自动切换到段落切分模式。
+切分流程（锚点模型）：
+    1. 读取书签树，扁平化成 [(depth, title, page), ...]
+    2. 标记噪声条目（车辆装备 / 便捷查阅分支）：不生成 chunk，但仍作为锚点
+    3. 每个条目在起始页文本中定位标题位置，得到锚点 (页码, 页内偏移)
+    4. section 内容 = 从自己的锚点到下一个条目的锚点（同页也能精确切开）
+    5. 第一个锚点之前的内容归入隐式「前言」section（书签是切分点而非覆盖范围，
+       封面/前言/目录/书签未收录的章节不应丢弃）
+    6. 页眉页脚裁剪（Seite XXX / Online Edition / 版权行）
+    7. 长 section 按 500 token 递归切分
 """
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 
 from pypdf import PdfReader
 
 from .base import PDFLoader
 
-MIN_CHARS = 30          # 少于这个字数的 chunk 丢弃
-SPLIT_SIZE = 11.0       # >= 这个字号 → 切分成新小节
-HEADING_SIZE = 10.0     # >= 这个字号 → 算标题（进路径）
+MAX_CHUNK_TOKENS = 500  # 单个 chunk 最大 token 数（与 MinerU 的 MAX_TOKENS 对齐）
+MIN_SECTION_TOKENS = 80  # section 少于此 token 时合并到前一个 section
+
+# 噪声书签标题：整条跳过
+SKIP_TITLES = {
+    "车辆装备",          # 每个 L2 下第一个 L3，内容是重复的免责声明 + 装备索引表
+}
+
+# 噪声 L1 章节：整棵子树跳过
+SKIP_L1_TITLES = {
+    "便捷查阅",          # 技术数据 / 附录 / 从 A 至 Z 都是手册末尾的参考信息
+}
+
+# 页眉页脚裁剪规则
+FOOTER_PATTERNS = [
+    re.compile(r"^Seite\s+\d+\s*$"),                       # BMW 手册页脚 Seite 100
+    re.compile(r"^Online Edition for Part no\."),          # BMW 手册页脚 Online Edition for Part no. 01405A...
+    re.compile(r"^\d{8}.*zh-cn\s*$"),                     # 版本号 01405A89DE4 zh-cn
+    re.compile(r"^©\s+\d{4}\s+Bayerische"),               # 版权页行
+]
 
 logger = logging.getLogger(__name__)
 
 
-def detect_pdf_quality(pdf_path: Path) -> str:
-    """检测 PDF 质量（字体信息是否完整）。
-    
-    采样前3页，分析字号分布：
-    - structured：字号种类 >= 4，有清晰层级
-    - plain_text：字号单一（全是1.0）或种类 <= 2，字体信息缺失
-    - scanned：无文字层（需 OCR）
-    
-    Returns:
-        "structured" / "plain_text" / "scanned"
+def estimate_tokens(text: str) -> int:
+    """估算 token 数（中文按字符数，英文按空格分词数）。"""
+    chinese = len(re.findall(r'[\u4e00-\u9fff]', text))
+    english = len(re.findall(r'\b\w+\b', text))
+    return chinese + english
+
+
+def detect_outline(pdf_path: Path) -> bool:
+    """检测 PDF 是否有可用的书签目录。
+
+    返回 True 当且仅当：
+        - 书签条目数 >= 10（不是空的或只有几个条目）
+        - 层级数 >= 2（扁平书签如领克 03 用户手册全 L1，不值得用 outline）
     """
     reader = PdfReader(str(pdf_path))
-    sample_pages = min(3, len(reader.pages))
-    
-    font_sizes = []
-    for i in range(sample_pages):
-        page = reader.pages[i]
-        def visitor(text, cm, tm, font_dict, font_size):
-            if text.strip():
-                font_sizes.append(round(font_size, 1))
-        try:
-            page.extract_text(visitor_text=visitor)
-        except Exception:
-            pass
-    
-    if not font_sizes:
-        return "scanned"
-    
-    unique_sizes = set(font_sizes)
-    # 字号种类 >= 4 种 → 有层级结构
-    if len(unique_sizes) >= 4:
-        return "structured"
-    # 字号几乎全是 1.0 → 字体信息缺失
-    if len(unique_sizes) <= 2 and 1.0 in unique_sizes:
-        return "plain_text"
-    
-    return "plain_text"
+    if not reader.outline:
+        return False
+
+    depth_counter = Counter()
+    entry_count = 0
+
+    def walk(items, depth):
+        nonlocal entry_count
+        for it in items:
+            if isinstance(it, list):
+                walk(it, depth + 1)
+            else:
+                entry_count += 1
+                depth_counter[depth] += 1
+
+    walk(reader.outline, 1)
+    if entry_count < 10:
+        return False
+    if len(depth_counter) < 2:
+        return False
+    return True
 
 
-def is_index_page(text: str) -> bool:
-    """判断是否是索引页：大量「中文+数字」配对（关键字 + 页码）。"""
-    return len(re.findall(r"[一-鿿]{2,}\s*\d{2,4}", text)) > 8
+def flatten_outline(reader: PdfReader) -> list[tuple[int, str, int]]:
+    """把 PDF 书签树扁平化成 [(depth, title, page), ...]。
 
-
-def extract_blocks(page) -> list[tuple[float, str]]:
-    """用字体信息抽取片段，并剔除页脚（从后往前找 "Seite " 锚点）。
-
-    Returns:
-        list[tuple]: [(字号, 文本), ...]
+    页码从 1 开始（pypdf 的 get_destination_page_number 返回 0-based）。
     """
-    parts = []
+    result = []
 
-    def visitor(text, cm, tm, font_dict, font_size):
-        t = text.strip()
-        if t:
-            parts.append((round(font_size, 1), t))
+    def walk(items, depth):
+        for it in items:
+            if isinstance(it, list):
+                walk(it, depth + 1)
+            else:
+                try:
+                    page = reader.get_destination_page_number(it) + 1
+                except Exception:
+                    page = -1
+                result.append((depth, str(it.title).strip(), page))
 
-    page.extract_text(visitor_text=visitor)
+    walk(reader.outline, 1)
+    return result
 
-    # 剔除页脚：找到最后一个 "Seite " 开头的片段，其后全部丢弃
-    for i in range(len(parts) - 1, -1, -1):
-        if parts[i][1].startswith("Seite "):
-            parts = parts[:i]
+
+def should_skip_l1(title: str) -> bool:
+    """判断 L1 标题是否整棵子树跳过。"""
+    return title in SKIP_L1_TITLES
+
+
+def build_section_entries(outline: list[tuple[int, str, int]]) -> list[tuple[list[str], str, int, bool]]:
+    """把扁平化的 outline 转成 [(完整路径, 标题, 起始页, 是否保留), ...]。
+
+    keep=False 的噪声条目（车辆装备 / 便捷查阅分支）不生成 chunk，
+    但仍保留在列表里——它们参与锚点定位，把相邻 section 的边界
+    切在正确位置（否则同页 section 会丢内容或重复，末尾 section
+    会吃掉被跳过章节的页面如 A-Z 索引）。
+    """
+    result = []
+    stack: dict[int, str] = {}  # depth -> title
+    skip_l1_root = None  # 当前跳过的 L1 根标题
+
+    for depth, title, page in outline:
+        # 清理更深层的栈
+        for d in list(stack.keys()):
+            if d >= depth:
+                del stack[d]
+
+        # 判断是否保留：便捷查阅整棵子树跳过；车辆装备单条跳过
+        if depth == 1 and should_skip_l1(title):
+            skip_l1_root = title
+            keep = False
+        elif skip_l1_root is not None and depth > 1:
+            keep = False
+        else:
+            if depth == 1:
+                skip_l1_root = None  # 新的 L1，退出跳过分支
+            keep = title not in SKIP_TITLES
+
+        if page < 1:
+            continue  # 无效页码的条目直接丢弃（也不作为锚点）
+
+        if not keep:
+            result.append(([], title, page, False))
+            continue
+
+        stack[depth] = title
+
+        # 构建完整路径（按 depth 顺序）
+        full = []
+        for d in sorted(stack):
+            if stack[d]:
+                full.append(stack[d])
+
+        # 相邻同名去重（如 X3 的 L1 和 L2 都叫 "提示"）
+        deduped = []
+        for t in full:
+            if not deduped or deduped[-1] != t:
+                deduped.append(t)
+
+        result.append((deduped, title, page, True))
+
+    return result
+
+
+def find_title_pos(page_text: str, title: str, search_from: int = 0) -> int:
+    """在页面文本中定位标题的起始位置（页内锚点）。
+
+    先原文匹配，失败再忽略空白差异匹配（标题可能被 PDF 换行拆开）。
+    从 search_from 开始找，保证同页多个锚点位置单调递增。
+    找不到时返回 search_from（退化为从前一个锚点处切分）。
+    """
+    pos = page_text.find(title, search_from)
+    if pos >= 0:
+        return pos
+
+    # 空白归一化匹配：去掉空白后查找，再映射回原文下标
+    stripped_chars = []
+    index_map = []
+    for i, ch in enumerate(page_text):
+        if not ch.isspace():
+            stripped_chars.append(ch)
+            index_map.append(i)
+    stripped = "".join(stripped_chars)
+    key = "".join(ch for ch in title if not ch.isspace())
+    if not key:
+        return search_from
+    start = 0
+    while True:
+        idx = stripped.find(key, start)
+        if idx < 0:
             break
-    return parts
+        orig = index_map[idx]
+        if orig >= search_from:
+            return orig
+        start = idx + 1
+    return search_from
 
 
-def join_lines(lines: list[str]) -> str:
-    """把 PDF 拆行的片段拼回完整的句子。
-
-    规则：上一片段末尾不是句末标点 → 说明话没说完 → 直接接上。
-    """
-    out = ""
+def strip_headers_footers(text: str) -> str:
+    """裁剪页眉页脚（BMW 手册的 Seite XXX / Online Edition / 版权行）。"""
+    lines = text.split("\n")
+    cleaned = []
     for line in lines:
-        if out and out[-1] not in "。！？；：":
-            out += line
-        else:
-            out += ("\n" if out else "") + line
-    return out
+        stripped = line.strip()
+        if not stripped:
+            cleaned.append(line)
+            continue
+        if any(p.match(stripped) for p in FOOTER_PATTERNS):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
 
-def build_sections(parts: list[tuple[float, str]]) -> list[tuple[list, list]]:
-    """按标题切分，每节带【完整标题路径】。
+def split_long_section(path: list[str], text: str, page: int) -> list[dict]:
+    """长 section 按 500 token 递归切分，每个 chunk 都带完整标题路径。"""
+    tokens = estimate_tokens(text)
+    if tokens <= MAX_CHUNK_TOKENS:
+        return [_make_chunk(path, text, page)]
 
-    标题栈规则：遇到同级或更高级标题时，弹出栈中同级/低级标题再入栈。
-    Returns:
-        list[tuple]: [([(字号, 标题), ...], [正文行, ...]), ...]
+    # 按句子边界切分，每片 <= MAX_CHUNK_TOKENS
+    sentences = re.split(r"(?<=[。！？；\n])", text)
+    chunks = []
+    current = []
+    current_tokens = 0
+
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        sent_tokens = estimate_tokens(sent)
+        if sent_tokens > MAX_CHUNK_TOKENS:
+            # 单段本身超上限且内部无句子边界（如整行无标点的目录导航）：
+            # 按字符数硬切。estimate_tokens(text) <= len(text) 恒成立，
+            # 按 MAX_CHUNK_TOKENS 字符切保证每片不超限
+            if current:
+                chunks.append(_make_chunk(path, "".join(current), page))
+                current, current_tokens = [], 0
+            for k in range(0, len(sent), MAX_CHUNK_TOKENS):
+                piece = sent[k:k + MAX_CHUNK_TOKENS].strip()
+                if piece:
+                    chunks.append(_make_chunk(path, piece, page))
+            continue
+        if current_tokens + sent_tokens > MAX_CHUNK_TOKENS and current:
+            chunks.append(_make_chunk(path, "".join(current), page))
+            current = []
+            current_tokens = 0
+        current.append(sent)
+        current_tokens += sent_tokens
+
+    if current:
+        chunks.append(_make_chunk(path, "".join(current), page))
+
+    return chunks
+
+
+def _make_chunk(path: list[str], body: str, page: int) -> dict:
+    """组装 chunk 字典。"""
+    path_str = " > ".join(path)
+    text = f"[{path_str}]\n{body}" if path_str else body
+    return {
+        "text": text,
+        "page": page,
+        "chapter": path[0] if len(path) > 0 else "",
+        "section": path[1] if len(path) > 1 else "",
+        "path": list(path),
+        "loader": "pypdf",
+    }
+
+
+def merge_short_sections(sections: list[tuple[list[str], str, int, str]]) -> list[tuple[list[str], str, int, str]]:
+    """把过短的 section 合并到前一个同父级 section。
+
+    输入: [(path, start_page, end_page, text), ...]
+    输出: 过滤过短 section 后，文本并入前一个。
     """
-    sections = []
-    titles = []  # 标题栈：[(字号, 标题), ...]
-    lines = []
+    if not sections:
+        return sections
 
-    for size, text in parts:
-        if size >= HEADING_SIZE:
-            # 切分点：当前节已有正文 → 收为一个小节
-            if size >= SPLIT_SIZE and lines:
-                sections.append((list(titles), lines))
-                lines = []
-            # 维护标题栈：去掉 >= 当前字号的（同级/低级标题出栈），再压入当前标题
-            titles = [t for t in titles if t[0] > size] + [(size, text)]
+    merged = []
+    for path, start_p, end_p, text in sections:
+        tokens = estimate_tokens(text)
+        if tokens < MIN_SECTION_TOKENS and merged:
+            # 并入前一个
+            prev_path, prev_sp, prev_ep, prev_text = merged[-1]
+            merged[-1] = (
+                prev_path,
+                prev_sp,
+                end_p,
+                prev_text + "\n" + text,
+            )
         else:
-            lines.append(text)
-
-    if lines:
-        sections.append((list(titles), lines))
-
-    return sections
-
-
-def section_text(titles: list[tuple[float, str]], lines: list[str]) -> str:
-    """把标题路径 + 正文拼成 chunk 文本，形如 "[车灯 > 自动车灯控制]\n正文..."。"""
-    path = " > ".join(t for _, t in titles)
-    body = join_lines(lines)
-    if not path:
-        return body
-    return f"[{path}]\n{body}"
+            merged.append((path, start_p, end_p, text))
+    return merged
 
 
 class PyPDFLoader(PDFLoader):
-    """pypdf 加载器实现（智能降级）。"""
+    """pypdf 加载器：书签目录优先，按 PDF 内置标题树切分。"""
 
     def load(self, pdf_path: Path) -> list[dict]:
-        """加载 PDF，根据质量选择切分策略。
-        
-        - structured PDF → 字体层级切分
-        - plain_text PDF → 段落切分（降级）
-        - scanned PDF → 抛异常（需用 MinerU）
+        """加载 PDF，优先使用 outline 切分。
+
+        - 有可用 outline → load_from_outline
+        - 无可用 outline → 抛异常（由 AutoLoader 降级到 MinerU）
         """
         pdf_path = Path(pdf_path)
-        quality = detect_pdf_quality(pdf_path)
-        
-        if quality == "structured":
-            logger.info(f"{pdf_path.name}: 检测到字体层级，使用结构化切分")
-            return self._load_structured(pdf_path)
-        elif quality == "plain_text":
-            logger.warning(f"{pdf_path.name}: 字体信息缺失，降级为段落切分（path 为空）")
-            return self._load_plain_text(pdf_path)
+
+        if detect_outline(pdf_path):
+            logger.info(f"{pdf_path.name}: 检测到书签目录 → 使用 outline 切分")
+            return self.load_from_outline(pdf_path)
         else:
             raise RuntimeError(
-                f"{pdf_path.name} 是扫描件或无文字层，pypdf 无法处理。"
+                f"{pdf_path.name} 没有可用的书签目录。"
                 f"请使用 MinerU: PDF_LOADER=mineru python src/core/build_chunks_new.py"
             )
-    
-    def _load_structured(self, pdf_path: Path) -> list[dict]:
-        """结构化切分（原有逻辑）：基于字体层级。"""
+
+    def load_from_outline(self, pdf_path: Path) -> list[dict]:
+        """按 PDF 书签目录切分（锚点模型）。"""
         reader = PdfReader(str(pdf_path))
+        total_pages = len(reader.pages)
+
+        # 1. 扁平化书签树
+        outline = flatten_outline(reader)
+
+        # 2. 标记噪声条目（不生成 chunk，但仍作为锚点参与边界切分）
+        entries = build_section_entries(outline)
+        kept = [e for e in entries if e[3]]
+        if not kept:
+            logger.warning(f"{pdf_path.name}: 过滤后无有效书签条目")
+            return []
+        logger.info(f"{pdf_path.name}: 原始书签 {len(outline)} 条，保留 {len(kept)} 个 section（跳过 {len(entries) - len(kept)} 条噪声）")
+
+        # 3. 页文本缓存（每页只提取一次，裁剪页眉页脚）
+        page_cache: dict[int, str] = {}
+
+        def page_text(p: int) -> str:
+            if p not in page_cache:
+                try:
+                    page_cache[p] = strip_headers_footers(reader.pages[p - 1].extract_text() or "")
+                except Exception:
+                    page_cache[p] = ""
+            return page_cache[p]
+
+        # 4. 计算全部条目的锚点 (页码, 页内偏移)。
+        #    同页多条目从上一个锚点之后开始找，保证位置单调递增
+        anchors = []
+        last_pos_on_page: dict[int, int] = {}
+        for _, title, page, _ in entries:
+            text = page_text(page)
+            search_from = last_pos_on_page.get(page, 0)
+            pos = find_title_pos(text, title, search_from)
+            anchors.append((page, pos))
+            last_pos_on_page[page] = pos
+
+        # 5. section 内容 = 从自己的锚点到下一个条目的锚点
+        #    （下一个条目无论保留与否，都作为当前 section 的终点）
+        raw_sections = []  # [(path, start_page, end_page, text)]
+
+        # 前置 section：第一个锚点之前的内容归入隐式「前言」section。
+        # 任何手册的开头都有封面/前言/目录等未被书签收录的内容，直接丢弃
+        # 会造成内容缺失（如 2 系第 6-7 页「提示」章节里的车辆识别号）
+        fp, fpos = anchors[0]
+        parts = [page_text(p) for p in range(1, fp)]
+        parts.append(page_text(fp)[:fpos])
+        preface = "\n".join(t for t in parts if t.strip()).strip()
+        if preface and estimate_tokens(preface) >= 10:
+            raw_sections.append((["前言"], 1, fp, preface))
+
+        for i, (path, title, start_page, keep) in enumerate(entries):
+            if not keep:
+                continue
+            sp, spos = anchors[i]
+            if i + 1 < len(anchors):
+                ep, epos = anchors[i + 1]
+            else:
+                ep, epos = total_pages, len(page_text(total_pages))
+            if (sp, spos) >= (ep, epos):
+                continue  # 锚点异常（标题定位失败等），跳过该 section
+
+            # 跨页拼装：起始页取锚点之后，中间页全取，结束页取锚点之前
+            if sp == ep:
+                text = page_text(sp)[spos:epos].strip()
+            else:
+                parts = [page_text(sp)[spos:]]
+                for p in range(sp + 1, ep):
+                    parts.append(page_text(p))
+                parts.append(page_text(ep)[:epos])
+                text = "\n".join(t for t in parts if t.strip()).strip()
+
+            if text and estimate_tokens(text) >= 10:
+                raw_sections.append((path, sp, ep, text))
+
+        # 6. 合并过短 section
+        merged = merge_short_sections(raw_sections)
+
+        # 7. 长 section 切分
         chunks = []
+        for path, sp, ep, text in merged:
+            chunks.extend(split_long_section(path, text, sp))
 
-        for pno, page in enumerate(reader.pages, 1):
-            parts = extract_blocks(page)
-            if not parts:
-                continue
-
-            for titles, lines in build_sections(parts):
-                text = section_text(titles, lines)
-
-                if len(text) < MIN_CHARS:   # 过短的丢弃
-                    continue
-                if text.count("...") > 5:   # 目录页丢弃
-                    continue
-                if is_index_page(text):     # 索引页丢弃
-                    continue
-
-                path = [t for _, t in titles]
-                chunks.append({
-                    "text": text,
-                    "page": pno,
-                    "chapter": path[0] if len(path) > 0 else "",
-                    "section": path[1] if len(path) > 1 else "",
-                    "path": path,
-                })
-
-        return chunks
-    
-    def _load_plain_text(self, pdf_path: Path) -> list[dict]:
-        """降级方案：按段落切分（字体信息缺失时）。
-        
-        策略：按双换行分段，过滤过短段落。
-        注意：chapter/section/path 为空，无结构信息。
-        """
-        reader = PdfReader(str(pdf_path))
-        chunks = []
-        
-        for page_num, page in enumerate(reader.pages, 1):
-            try:
-                text = page.extract_text()
-            except Exception:
-                continue
-            
-            if not text.strip():
-                continue
-            
-            # 按双换行分段
-            paragraphs = re.split(r'\n\n+', text)
-            
-            for para in paragraphs:
-                para = para.strip()
-                # 过滤：过短、纯数字、纯符号
-                if len(para) < MIN_CHARS:
-                    continue
-                if para.isdigit():
-                    continue
-                if all(c in '.-_=[]()' for c in para):
-                    continue
-                
-                chunks.append({
-                    "text": para,
-                    "page": page_num,
-                    "chapter": "",
-                    "section": "",
-                    "path": [],
-                })
-        
+        logger.info(f"{pdf_path.name}: 最终 {len(chunks)} 个 chunk（MAX_CHUNK_TOKENS={MAX_CHUNK_TOKENS}）")
         return chunks
