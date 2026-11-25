@@ -31,14 +31,22 @@ logger = logging.getLogger(__name__)
 
 
 def gold_rank(nodes, pages=None, model=None, answer=None) -> int | None:
-    """第一条金标所在名次；未命中返回 None。"""
+    """第一条金标所在名次；未命中返回 None。
+
+    「所在」按页码范围判定：chunk 覆盖 [page, page_end] 区间，金标页落在
+    区间内即算命中。只认起始页会把跨页 section 中间页的答案判成未命中
+    （如手册前言覆盖 p1~p8，答案在第 7 页）。
+    """
     pages = set(pages or [])
     for i, n in enumerate(nodes, 1):
         m = n.node.metadata
         if model and m.get("model") != model:
             continue
-        if pages and m.get("page") in pages:
-            return i
+        if pages:
+            start = m.get("page")
+            end = m.get("page_end") or start
+            if start is not None and any(start <= g <= end for g in pages):
+                return i
         if answer and answer in (n.node.text or ""):
             return i
     return None
@@ -110,9 +118,9 @@ def eval_compare(index, rerank, q: dict) -> tuple[list[dict], list[dict], list[s
         if spec is None:
             lines.append(f"     子问未对上金标: {item['query']}")
             continue
-        sub, route = item["query"], item["route"]
+        route = item["route"]
         if spec["intent"] == "enumerate":
-            r = eval_enum(index, sub, route["filters"], spec.get("params") or [])
+            r = eval_enum(index, route["query"], route["filters"], spec.get("params") or [])
             enums.append(r)
             lines.append(
                 f"     [{spec['model']}] Recall={r['recall']:.2f} Precision={r['precision']:.2f} "
@@ -120,7 +128,7 @@ def eval_compare(index, rerank, q: dict) -> tuple[list[dict], list[dict], list[s
             )
         else:
             r = eval_point(
-                index, rerank, sub, route["filters"],
+                index, rerank, route["query"], route["filters"],
                 spec.get("source_pages") or [], spec.get("model"), spec.get("answer"),
             )
             points.append(r)
@@ -144,11 +152,11 @@ def eval_one(index, rerank, q: dict) -> dict:
         p, e, extra = eval_compare(index, rerank, q)
         points, enums, lines = points + p, enums + e, lines + extra
     elif q["intent"] == "enumerate":
-        r = eval_enum(index, query, route["filters"], q.get("params") or [])
+        r = eval_enum(index, route["query"], route["filters"], q.get("params") or [])
         enums.append(r)
         lines.append(f"     Recall={r['recall']:.2f} Precision={r['precision']:.2f} ({r['n_got']}/{r['n_gold']})")
     else:
-        r = eval_point(index, rerank, query, route["filters"], q.get("source_pages") or [], q.get("model"))
+        r = eval_point(index, rerank, route["query"], route["filters"], q.get("source_pages") or [], q.get("model"))
         points.append(r)
         status = "未召回" if r["unrecoverable"] else f"粗排@{r['coarse_rank']} → 精排@{r['fine_rank']}"
         lines.append(f"     {status}")

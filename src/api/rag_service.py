@@ -10,10 +10,12 @@ from pathlib import Path
 
 from src.core.build_index import get_index_dir
 from src.core.embedders import get_embedder
-from src.core.generate import generate, generate_stream
-from src.core.query_filter import build_query_filters
+from src.core.generate import generate, generate_stream, rewrite_compare_query
+from src.core.query_filter import detect_companies, detect_models, route_query
 from src.core.rerankers import get_reranker
 from src.core.vectorstores import get_vector_store, vector_store_name
+
+POINT_K = 20  # 点查/枚举的粗排召回数
 
 class RAGService:
     """端到端 RAG 服务(进程内单例)"""
@@ -28,16 +30,38 @@ class RAGService:
         self.reranker = get_reranker(top_n=5)
 
     def _retrieve(self, question: str):
-        """检索 + 重排：问题带车型/品牌词时按 metadata 前置过滤。
+        """检索 + 重排：按 route_query 的意图路由。
 
-        路由分层：车型词 → company+model 双过滤；品牌词 → company 过滤；
-        都没有 → 全库检索。retriever 按问题动态创建（过滤条件因问题而异），
-        底层索引/模型仍是构造时加载的同一份，无重复开销。
+        - compare：拆成单车型子问题，各自路由检索后合并（否则双车型问题
+          只按第一个车型过滤，另一车型的证据全被滤掉）
+        - enumerate：按 route_query 给的配置表 + category 过滤
+        - point：company/model 过滤 + 向量检索
+        retriever 按问题动态创建，底层索引/模型是构造时加载的同一份。
         """
-        filters = build_query_filters(question)
-        retriever = self.index.as_retriever(similarity_top_k=20, filters=filters)
-        nodes = retriever.retrieve(question)
-        return self.reranker.postprocess_nodes(nodes, query_str=question)
+        route = route_query(question)
+        if route["intent"] == "compare":
+            return self._retrieve_compare(question)
+
+        retriever = self.index.as_retriever(similarity_top_k=POINT_K, filters=route["filters"])
+        nodes = retriever.retrieve(route["query"])
+        return self.reranker.postprocess_nodes(nodes, query_str=route["query"])
+
+    def _retrieve_compare(self, question: str):
+        """对比题：LLM 改写成单车型问题，每路独立路由，按节点 id 去重合并。
+
+        reranker 每个子问题各取 top_n，合并后节点数 = 子问题数 × top_n，
+        让生成侧同时拿到两边的证据。
+        """
+        subs = rewrite_compare_query(question, detect_models(question), detect_companies(question))
+        merged = {}
+        for sub in subs:
+            route = route_query(sub)
+            nodes = self.index.as_retriever(
+                similarity_top_k=POINT_K, filters=route["filters"]
+            ).retrieve(route["query"])
+            for n in self.reranker.postprocess_nodes(nodes, query_str=route["query"]):
+                merged[n.node.node_id] = n
+        return list(merged.values())
 
     def retrieve_only(self, question: str) -> dict:
         """只检索不生成（car-agent 的 clarify 歧义判定用，二期 HTTP 端点 POST /retrieve 的内核）。

@@ -7,6 +7,7 @@
     python src/core/test_retrieval.py
 """
 import logging
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -61,8 +62,13 @@ def show_enumeration(nodes, category, expect_params=None):
         detail_logger.info(f"  [{cat}] {head}{more}")
     if expect_params is None:
         return
-    missing = [p for p in expect_params if p not in got]
-    extra = [p for p in got if p not in expect_params]
+    # 归一化比对：忽略空白差异（金标「无钥匙进入 & 无钥匙启动系统」与
+    # 实际「无钥匙进入&无钥匙启动系统」只差空格，不应算缺漏）
+    norm = lambda s: re.sub(r"\s+", "", s)
+    got_set = {norm(p) for p in got}
+    expect_set = {norm(p) for p in expect_params}
+    missing = [p for p in expect_params if norm(p) not in got_set]
+    extra = [p for p in got if norm(p) not in expect_set]
     detail_logger.info(f"  期望 {len(expect_params)} 项，命中 {len(expect_params) - len(missing)}，缺 {len(missing)}，多 {len(extra)}")
     if missing:
         detail_logger.info(f"  缺失: {missing[:8]}")
@@ -96,10 +102,10 @@ def show_compare(index, rerank, case):
         detail_logger.info(f"\n  子问：{item['query']}")
         detail_logger.info(f"  路由: {item['route']['intent']} | 类别: {item['route']['category']}")
         if item["route"]["intent"] == "enumerate":
-            show_enum(index, item["query"], item["route"], spec.get("params") if spec else None)
+            show_enum(index, item["route"]["query"], item["route"], spec.get("params") if spec else None)
         else:
             pages = spec.get("source_pages") if spec else None
-            coarse, _ = retrieve_point(index, rerank, item["query"], item["route"]["filters"])
+            coarse, _ = retrieve_point(index, rerank, item["route"]["query"], item["route"]["filters"])
             show_nodes(coarse, pages)
 
 
@@ -116,9 +122,9 @@ def run_one(index, rerank, case: dict) -> None:
         show_compare(index, rerank, case)
         return
     if route["intent"] == "enumerate":
-        show_enum(index, query, route, case.get("params"))
+        show_enum(index, route["query"], route, case.get("params"))
         return
-    show_point(index, rerank, query, route["filters"], case.get("source_pages"))
+    show_point(index, rerank, route["query"], route["filters"], case.get("source_pages"))
 
 
 def main():

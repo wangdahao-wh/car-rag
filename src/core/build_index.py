@@ -130,6 +130,7 @@ def to_nodes(chunks: list[dict]) -> list[TextNode]:
                 "model": c["model"],
                 "doc_type": c["doc_type"],
                 "page": c["page"],
+                "page_end": c.get("page_end", c["page"]),
                 "chapter": c["chapter"],
                 "section": c["section"],
                 "loader": c.get("loader", ""),

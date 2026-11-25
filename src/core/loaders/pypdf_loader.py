@@ -17,9 +17,11 @@
     6. 页眉页脚裁剪（Seite XXX / Online Edition / 版权行）
     7. 长 section 按 500 token 递归切分
 """
+import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -81,6 +83,7 @@ def detect_outline(pdf_path: Path) -> bool:
                 depth_counter[depth] += 1
 
     walk(reader.outline, 1)
+    # 约束：目录条目个数 和 目录深度
     if entry_count < 10:
         return False
     if len(depth_counter) < 2:
@@ -148,6 +151,8 @@ def build_section_entries(outline: list[tuple[int, str, int]]) -> list[tuple[lis
             continue  # 无效页码的条目直接丢弃（也不作为锚点）
 
         if not keep:
+            # 噪声条目路径留空，下游整节丢弃；但保留在列表里作为锚点，
+            # 让下一个 section 从「警示闪光灯」等标题处开始切
             result.append(([], title, page, False))
             continue
 
@@ -219,11 +224,11 @@ def strip_headers_footers(text: str) -> str:
     return "\n".join(cleaned)
 
 
-def split_long_section(path: list[str], text: str, page: int) -> list[dict]:
+def split_long_section(path: list[str], text: str, page: int, page_end: int) -> list[dict]:
     """长 section 按 500 token 递归切分，每个 chunk 都带完整标题路径。"""
     tokens = estimate_tokens(text)
     if tokens <= MAX_CHUNK_TOKENS:
-        return [_make_chunk(path, text, page)]
+        return [_make_chunk(path, text, page, page_end)]
 
     # 按句子边界切分，每片 <= MAX_CHUNK_TOKENS
     sentences = re.split(r"(?<=[。！？；\n])", text)
@@ -241,33 +246,38 @@ def split_long_section(path: list[str], text: str, page: int) -> list[dict]:
             # 按字符数硬切。estimate_tokens(text) <= len(text) 恒成立，
             # 按 MAX_CHUNK_TOKENS 字符切保证每片不超限
             if current:
-                chunks.append(_make_chunk(path, "".join(current), page))
+                chunks.append(_make_chunk(path, "".join(current), page, page_end))
                 current, current_tokens = [], 0
             for k in range(0, len(sent), MAX_CHUNK_TOKENS):
                 piece = sent[k:k + MAX_CHUNK_TOKENS].strip()
                 if piece:
-                    chunks.append(_make_chunk(path, piece, page))
+                    chunks.append(_make_chunk(path, piece, page, page_end))
             continue
         if current_tokens + sent_tokens > MAX_CHUNK_TOKENS and current:
-            chunks.append(_make_chunk(path, "".join(current), page))
+            chunks.append(_make_chunk(path, "".join(current), page, page_end))
             current = []
             current_tokens = 0
         current.append(sent)
         current_tokens += sent_tokens
 
     if current:
-        chunks.append(_make_chunk(path, "".join(current), page))
+        chunks.append(_make_chunk(path, "".join(current), page, page_end))
 
     return chunks
 
 
-def _make_chunk(path: list[str], body: str, page: int) -> dict:
-    """组装 chunk 字典。"""
+def _make_chunk(path: list[str], body: str, page: int, page_end: int) -> dict:
+    """组装 chunk 字典。
+
+    page_end 是 section 覆盖的最后一页（含）：跨页 section 的 chunk 从 page 跨到
+    page_end，评测按页码范围匹配，避免只认起始页导致中间页的答案被判未命中。
+    """
     path_str = " > ".join(path)
     text = f"[{path_str}]\n{body}" if path_str else body
     return {
         "text": text,
         "page": page,
+        "page_end": page_end,
         "chapter": path[0] if len(path) > 0 else "",
         "section": path[1] if len(path) > 1 else "",
         "path": list(path),
@@ -280,6 +290,9 @@ def merge_short_sections(sections: list[tuple[list[str], str, int, str]]) -> lis
 
     输入: [(path, start_page, end_page, text), ...]
     输出: 过滤过短 section 后，文本并入前一个。
+
+    父级不同不合并：否则故障救援章下的「警示闪光灯」会被并进上一章的
+    「保险丝」，标题路径与正文串味。
     """
     if not sections:
         return sections
@@ -287,9 +300,14 @@ def merge_short_sections(sections: list[tuple[list[str], str, int, str]]) -> lis
     merged = []
     for path, start_p, end_p, text in sections:
         tokens = estimate_tokens(text)
-        if tokens < MIN_SECTION_TOKENS and merged:
-            # 并入前一个
-            prev_path, prev_sp, prev_ep, prev_text = merged[-1]
+        prev = merged[-1] if merged else None
+        same_parent = (
+            prev is not None
+            and len(path) == len(prev[0])
+            and path[:-1] == prev[0][:-1]
+        )
+        if tokens < MIN_SECTION_TOKENS and same_parent:
+            prev_path, prev_sp, _, prev_text = prev
             merged[-1] = (
                 prev_path,
                 prev_sp,
@@ -303,6 +321,13 @@ def merge_short_sections(sections: list[tuple[list[str], str, int, str]]) -> lis
 
 class PyPDFLoader(PDFLoader):
     """pypdf 加载器：书签目录优先，按 PDF 内置标题树切分。"""
+
+    def __init__(self, raw_dir: Path | None = None):
+        """
+        :param raw_dir: 原始抽取数据落盘目录，
+            默认 <项目根>/processed_docs/pypdf/raw/（与 mineru/raw 对齐）
+        """
+        self.raw_dir = raw_dir or Path(__file__).resolve().parents[3] / "processed_docs" / "pypdf" / "raw"
 
     def load(self, pdf_path: Path) -> list[dict]:
         """加载 PDF，优先使用 outline 切分。
@@ -326,7 +351,7 @@ class PyPDFLoader(PDFLoader):
         reader = PdfReader(str(pdf_path))
         total_pages = len(reader.pages)
 
-        # 1. 扁平化书签树
+        # 1. 扁平化书签树 flatten：压平 动词
         outline = flatten_outline(reader)
 
         # 2. 标记噪声条目（不生成 chunk，但仍作为锚点参与边界切分）
@@ -374,8 +399,8 @@ class PyPDFLoader(PDFLoader):
             raw_sections.append((["前言"], 1, fp, preface))
 
         for i, (path, title, start_page, keep) in enumerate(entries):
-            if not keep:
-                continue
+            if not keep and not path:
+                continue  # 便捷查阅子树：整节丢弃
             sp, spos = anchors[i]
             if i + 1 < len(anchors):
                 ep, epos = anchors[i + 1]
@@ -400,10 +425,44 @@ class PyPDFLoader(PDFLoader):
         # 6. 合并过短 section
         merged = merge_short_sections(raw_sections)
 
-        # 7. 长 section 切分
+        # 7. 长 section 切分（page_end 记录 section 实际覆盖到的最后一页）
         chunks = []
         for path, sp, ep, text in merged:
-            chunks.extend(split_long_section(path, text, sp))
+            chunks.extend(split_long_section(path, text, sp, ep))
 
         logger.info(f"{pdf_path.name}: 最终 {len(chunks)} 个 chunk（MAX_CHUNK_TOKENS={MAX_CHUNK_TOKENS}）")
+
+        # 8. 落盘原始抽取数据（书签树 + 每页文本），供调试和切分对比
+        self._save_raw(pdf_path, total_pages, outline, entries, page_text)
+
         return chunks
+
+    def _save_raw(
+        self,
+        pdf_path: Path,
+        total_pages: int,
+        outline: list[tuple[int, str, int]],
+        entries: list[tuple[list[str], str, int, bool]],
+        page_text: Callable[[int], str],
+    ) -> None:
+        """落盘原始抽取数据，与 processed_docs/mineru/raw 对齐。
+
+        mineru 存 content_list.json，pypdf 存同一个 JSON：
+        书签树（含被过滤的噪声条目）+ 每页文本。页文本已裁剪页眉页脚，
+        与切分输入一致，可以直接对照 chunk 排查切分问题。
+        """
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        raw = {
+            "pdf_name": pdf_path.name,
+            "total_pages": total_pages,
+            "header_footer_stripped": True,
+            "outline": [[depth, title, page] for depth, title, page in outline],
+            "sections": [
+                {"path": path, "title": title, "page": page, "keep": keep}
+                for path, title, page, keep in entries
+            ],
+            "pages": {str(p): page_text(p) for p in range(1, total_pages + 1)},
+        }
+        out = self.raw_dir / f"{pdf_path.stem}.json"
+        out.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(f"{pdf_path.name}: 原始抽取数据已保存 {out}")

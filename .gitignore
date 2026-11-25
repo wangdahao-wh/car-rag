@@ -18,6 +18,8 @@ data/*-chunks.json
 # MinerU/pypdf 解析与切分的全部中间产物（PDF 分片、解压结果、
 # chunks、chunks_rowwise 等，均可用 build_chunks_new.py 重建）
 processed_docs/
+# 测试脚本的产出（mineru 原始解析结果、对比报告等，可重新生成）
+test/output/
 
 # ============================================================
 # Python

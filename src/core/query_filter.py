@@ -84,7 +84,7 @@ CATEGORY_SYNONYMS = {
         "categories": {"领克": ["内部配置"], "BMW": ["内装", "内饰条", "座椅材质", "座椅材质*"]},
     },
     "车身颜色": {
-        "words": ["颜色", "车漆", "车身漆", "漆"],
+        "words": ["外观配色", "颜色", "车漆", "车身漆", "漆"],
         "categories": {"领克": ["外部配置"], "BMW": ["车身漆"]},
     },
     "车轮": {
@@ -96,6 +96,19 @@ CATEGORY_SYNONYMS = {
         "categories": {"领克": ["个性化选装", "运动空气套件"], "BMW": ["BMW专属定制"]},
     },
 }
+
+# 用户口语 → 手册原生术语。手册里没有「应急装备」这个词，
+# 对应章节是「故障救援 > 车辆装备」（警示闪光灯/反光安全背心/警告三角标志/包扎绷带）。
+# 检索时把原生术语追加在原问题后，原问题保留不动。
+QUERY_SYNONYMS = {
+    "应急装备": "故障救援 警示闪光灯 反光安全背心 警告三角标志 包扎绷带",
+}
+
+
+def expand_query(query: str) -> str:
+    """把用户口语术语展开为手册原生术语，BM25 与向量检索共用。"""
+    extras = [native for term, native in QUERY_SYNONYMS.items() if term in query]
+    return f"{query} {' '.join(extras)}" if extras else query
 
 
 def detect_models(query: str) -> list[str]:
@@ -127,11 +140,17 @@ def detect_company(query: str) -> str | None:
 
 
 def detect_category(query: str) -> str | None:
-    """识别查询中的装备类别词，返回标准类别 key；无类别词返回 None。"""
+    """识别查询中的装备类别词，返回标准类别 key；无类别词返回 None。
+
+    取命中的最长关键词：越长的词越具体，「外观配色」应归到车身颜色，
+    不能因为「外观」先于「车身颜色」遍历就被判成外观。
+    """
+    best, best_len = None, 0
     for std, spec in CATEGORY_SYNONYMS.items():
-        if any(w in query for w in spec["words"]):
-            return std
-    return None
+        for word in spec["words"]:
+            if word in query and len(word) > best_len:
+                best, best_len = std, len(word)
+    return best
 
 
 def detect_intent(query: str) -> str:
@@ -212,20 +231,23 @@ def build_enumerate_filters(query: str) -> MetadataFilters | None:
 
 
 def route_query(query: str) -> dict:
-    """查询路由总入口：意图 + 过滤条件。
+    """查询路由总入口：意图 + 过滤条件 + 检索用问题。
 
     Returns:
         {"intent": "enumerate" | "point" | "compare",
+         "query": 术语展开后的检索用问题,
          "filters": MetadataFilters | None,
          "category": 标准类别 key | None}
     """
     intent = detect_intent(query)
+    expanded = expand_query(query)
     if intent == "compare":
-        return {"intent": intent, "filters": None, "category": detect_category(query)}
+        return {"intent": intent, "query": expanded, "filters": None, "category": detect_category(query)}
     if intent == "enumerate":
         return {
             "intent": intent,
+            "query": expanded,
             "filters": build_enumerate_filters(query),
             "category": detect_category(query),
         }
-    return {"intent": intent, "filters": build_query_filters(query), "category": None}
+    return {"intent": intent, "query": expanded, "filters": build_query_filters(query), "category": None}
