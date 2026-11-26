@@ -11,7 +11,7 @@ from pathlib import Path
 from src.core.build_index import get_index_dir
 from src.core.embedders import get_embedder
 from src.core.generate import generate, generate_stream, rewrite_compare_query
-from src.core.query_filter import detect_companies, detect_models, route_query
+from src.core.query_filter import detect_companies, detect_models, detect_out_of_scope, route_query
 from src.core.rerankers import get_reranker
 from src.core.vectorstores import get_vector_store, vector_store_name
 
@@ -38,6 +38,10 @@ class RAGService:
         - point：company/model 过滤 + 向量检索
         retriever 按问题动态创建，底层索引/模型是构造时加载的同一份。
         """
+        if not detect_companies(question) and not detect_models(question):
+            if detect_out_of_scope(question):
+                return []
+
         route = route_query(question)
         if route["intent"] == "compare":
             return self._retrieve_compare(question)

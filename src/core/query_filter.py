@@ -27,6 +27,18 @@ COMPANY_PATTERNS = {
     "BMW": re.compile(r"宝马|bmw|x3|m240i?|2系", re.IGNORECASE),
 }
 
+# 库外品牌指代：中文品牌名后紧跟"汽车"（如"小鹏汽车"）；非库内品牌则视为库外
+_OUT_OF_SCOPE_CAR = re.compile(r"([\u4e00-\u9fa5]{2,6})汽车")
+
+
+def detect_out_of_scope(query: str) -> bool:
+    """用正则识别「XX汽车」形式的库外品牌指代。"""
+    m = _OUT_OF_SCOPE_CAR.search(query)
+    if not m:
+        return False
+    brand = m.group(1)
+    return not any(pattern.search(brand) for pattern in COMPANY_PATTERNS.values())
+
 # 车型 → (查询词模式, 所属品牌)；顺序敏感：长词在前（03Plus 先于 03）
 # (?<!\d)03(?!\d)：前后不是数字，避免误匹配 2023 款等年份中的 03
 MODEL_PATTERNS = {
